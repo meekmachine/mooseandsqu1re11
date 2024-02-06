@@ -1,0 +1,66 @@
+Guide to install eEva's dependencies and running the application
+-------------------------------------------------------------------
+
+Required software:
+- nodejs
+- mongodb
+- Webstorm (optional; only for modifying the application; js mainframe is independent)
+
+-------------------------------------------------------------------
+
+1) upgrade nodejs to v8 (latest version has issues)
+
+$ sudo apt-get update
+$ sudo apt-get install curl
+$ curl -sL https://deb.nodesource.com/setup_8.x | sudo -E bash -
+$ sudo apt-get install -y nodejs
+
+-------------------------------------------------------------------
+
+2) install node modules (cd to project root, where public, server, client etc folders are located)
+
+$ npm install .
+
+-------------------------------------------------------------------
+
+3) install bower 
+
+$ sudo -H npm install -g bower
+
+3.1) install bower components (cd to public folder, see doc/eEVA_Parse_InstallationManual.pdf for extra details)
+
+$ bower install
+
+-------------------------------------------------------------------
+
+4) Restore mongo database from a dump by using the following command:
+
+$ mongorestore --drop -d eEvaParse mongodump-2018-09-11_11-04\eEvaParse
+
+Note: the actual database dump folder might be different (see blank-slate version by Emmanuel)
+
+-------------------------------------------------------------------
+
+5) Launch the application (cd to root):
+
+$ ./start.sh
+
+-------------------------------------------------------------------
+
+6) Open Google Chrome and access http://localhost:3013 -- ensure you are connected to the internet for speech recognition and synthesis to work.
+
+-------------------------------------------------------------------
+(optional)
+*) in webstorms, after following tutorial (see doc/eEVA_Parse_InstallationManual.pdf), add the following (bogus) environment variables:
+
+SECRET=rc239tv9n32vr327r9379vrh232vu9
+PORT=3013
+EMAIL_NAME=visage.lab.fiu@gmail.com
+EMAIL_pass=None
+DATABASE_URI=mongodb://localhost:27017/eEvaParse
+APP_ID=83fy28yfh238
+MASTER_KEY=4j329432j92
+FILE_KEY=r39if93jg33
+SERVER_URL=http://localhost:3013/parse
+SITE_URL=http://localhost:3013
+

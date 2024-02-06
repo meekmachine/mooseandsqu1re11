@@ -1,0 +1,30 @@
+Note the following changes to needed to be made when running on localhost:
+
+In the '/' folder there is a file, app.js.  In order to run eEVA locally you need to change the
+Parse.serverURL variable to the string 'http://localhost:3013/parse' (note 3013 is the port number, you may be using a different
+port to access this web application, please make sure that you use the port in which you are accessing eEVA from).  It should
+look like the following:
+    To Run Locally:                     Parse.serverURL = 'http://localhost:3013/parse';
+    When running on the Affect server:  Parse.serverURL = 'https://virtualhealthcounseling.com/parse';
+
+Although there is an affect version (http://affect.cs.fiu.edu:3013/parse), we should always use the https secure site for virtualhealthcounseling
+Within the same file you will see that line 33 is commented out (note the line number maybe be different but the code
+should be relatively close to that position, the line corresponds to the configuration of the ParseServer, in particular setting the path
+to the cloud code).  You need to uncomment this line and comment line 32. It should look like
+the following:
+
+When running locally (i.e. on localhost):
+33  //cloud: './eEvaParse/server/cloud/main.js',
+34  cloud: './server/cloud/main.js',
+
+When running on the Affect server:
+33  cloud: './eEvaParse/server/cloud/main.js',
+34  //cloud: './server/cloud/main.js',
+
+In the '/client' directory there is a file, app.module.js.  In order to run eEVA locally you need to change the
+Parse.serverURL variable to the string 'http://localhost:3013/parse' (note 3013 is the port number, you may be using a different
+port to access this web application, please make sure that you use the port in which you are accessing eEVA from).  It should
+look like the following:
+    To Run Locally:                     Parse.serverURL = 'http://localhost:3013/parse';
+    When running on the Affect server:  Parse.serverURL = 'https://virtualhealthcounseling.com/parse';
+

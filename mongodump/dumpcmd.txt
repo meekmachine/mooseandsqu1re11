@@ -1,0 +1,32 @@
+
+=======================================================================================================================
+
+MAKE A DUMP OF A DATABASE:
+mongodump --db <db-name> --out <directory-desired>
+ex:  mongodump --db eEvaParse --out mongodump-2018-05-22_12-02
+
+Note: if you receive this error upon trying the above command
+ Failed: error dumping metadata: error creating metadata file
+ mongodump-2017-12-07_12-02\eEvaParse\_Join:users:_Role.metadata.json: open mongodump-2017-12-07_12-02\eEvaParse\
+ _Join:users:_Role.metadata.json: The system cannot find the file specified.
+
+use this command to rectify:
+mongodump --db <name of database>  --out <directory for mongodump) --excludeCollection _Join:users:_Role
+ex:
+mongodump --db eEvaParse --out mongodump-2019-11-01_12-17 --excludeCollection _Join:users:_Role
+
+***********************************************************************************************************************
+
+RESTORE A DUMP OF A DATABASE
+Make sure mongod is running in your terminal and open another terminal to perform the following:
+
+mongorestore --drop -d eEvaParse <path of the directory-of-dumped-backup>
+
+ex: while using the terminal, navigate into the mongodump folder (note you do not need to be in the mongodump folder
+but make sure your path reflects that, also ensure that your path is pointing to the eEvaParse directory within that
+mongodump folder, see below for example)
+
+mongorestore --drop -d eEvaParse mongodump-2019-11-01_12-17\eEvaParse
+
+
+=======================================================================================================================

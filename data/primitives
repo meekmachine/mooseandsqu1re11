@@ -1,0 +1,4051 @@
+var ResourceBox = Class.create
+({
+    initialize: function(requiredResources, providedResources, resourceNames, placeholders)
+    {
+        var self = this;
+        
+        self.required = requiredResources;
+        self.provided = providedResources;
+        self.names = resourceNames;
+
+        self.placeholders = placeholders;
+    }
+});
+
+var EventGuard = Class.create
+({
+    initialize: function(event, onTransition)
+    {
+        var self = this;
+        self.type = "EventGuard";
+
+        if (onTransition === undefined) onTransition = function(m){};
+        
+        self.event = event;
+        self.onTransition = onTransition; //a function that gets executed on transitioning
+    },
+    
+    eval: function(events, memory)
+    {
+        var self = this;
+        
+        if (self.event === "lambda") return true;
+        for (var i=0; i<events.length; ++i)
+        {
+            //console.log("checking events: " + self.event + " vs " + events[i]);
+            if (self.event === events[i]) return true;
+        }
+
+        return false;
+    },
+
+    exec: function(memory)
+    {
+        var self = this;
+
+        self.onTransition(memory);
+    },
+
+    equals: function(guard)
+    {
+        var self = this;
+
+        if (self.type != guard.type) return false;
+
+        if (self.event != guard.event) return false;
+
+        //Not care about on transition, because if condition is the same, it's bad...
+
+        return true;
+    }
+});
+
+var ConditionGuard = Class.create
+({
+    initialize: function(f, onTransition)
+    {
+        var self = this;
+        self.type = "ConditionGuard";
+
+        if (onTransition === undefined) onTransition = function(m){};
+        
+        self.f = f;
+        self.onTransition = onTransition; //a function that gets executed on transitioning
+    },
+    
+    eval: function(events, memory)
+    {
+        var self = this;
+        
+        return self.f(memory);
+    },
+
+    exec: function(memory)
+    {
+        var self = this;
+
+        return self.onTransition(memory);
+    },
+
+    equals: function(guard)
+    {
+        var self = this;
+
+        if (self.type != guard.type) return false;
+
+        if (self.f.toString() != guard.f.toString()) return false;
+
+        //Not care about on transition, because if condition is the same, it's bad...
+
+        return true;
+    }
+});
+
+var InterventionEngineState = Class.create
+({
+    initialize: function(memory, events, resBox)
+    {
+        var self = this;
+        
+        if (memory===undefined) memory = {};
+        
+        self.memory = memory;
+        self.eventsHappened = events;
+        //self.defaultInternalState={};
+    },
+    
+    initMemoValue: function(key, val)
+    {
+        var self = this;
+        
+        if (!(key in self.memory))
+        {
+            self.memory[key] = val;
+        }
+    },
+    
+    writeToMemo: function(key, val)
+    {
+        var self = this;
+        
+        self.memory[key] = val;
+    },
+    
+    readFromMemo: function(key)
+    {
+        var self = this;
+        
+        return self.memory[key];
+    },
+    
+    beforeExecution: function()
+    {
+        //may be overriden
+    },
+    
+    afterExecution: function()
+    {
+        var self = this;
+        
+        //may be overriden
+    },
+    
+    //returns true if done, false otherwise (returning false will keep calling the execute method)
+    execute: function()
+    {
+        var self = this;
+        
+        return true;
+    }
+});
+
+var InterventionEngineTransition = Class.create
+({
+    initialize: function(from, to, guard)
+    {
+        var self = this;
+        
+        self.from = from; //state transitioning from
+        self.to = to; //state transitioning to
+        self.guard = guard; //only transition if event happened (lambda constantly happens)
+    },
+    
+    equals: function(t)
+    {
+        var self = this;
+        
+        if (self.from === t.from && self.to === t.to && self.guard.equals(t.guard)) return true;
+        
+        return false;
+    }
+});
+
+var InterventionEngine = Class.create(InterventionEngineState, //inherits from State, so that we can have nested state machines
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        
+        $super(memory, events, resBox);
+        
+        self.states = []; // (name: stateName, state: stateObject) values
+        self.transitions = []; // (from: stateNamei, to: stateNamej, event: eventi])
+        self.initialState = null;
+        self.finalStates = [];
+        self.currentState = null;
+        
+        self.internalStates = {
+            EXECUTING_STATE: 0,
+            EXECUTING_TRANSITION: 1
+        };
+        self.currentInternalState = self.internalStates.EXECUTING_STATE;
+    },
+    
+    addState: function(name, obj)
+    {
+        var self = this;
+        
+        if (name in self.states)
+        {
+            console.log("InterventionEngine: Duplicate state name: "+name+" !");
+            return;
+        }
+        
+        self.states[name] = obj;
+    },
+    
+    addTransition: function(from, to, guard)
+    {
+        var self = this;
+        
+        if(guard === undefined) guard = new EventGuard("lambda");
+        
+        var transition = new InterventionEngineTransition(from, to, guard);
+        
+        for (var i=0; i<self.transitions.length; ++i)
+        {
+            if (transition.equals(self.transitions[i]))
+            {
+                console.log("InterventionEngine: Transition from "+from+" to "+to+" already exists.");
+                return;
+            }
+        }
+        
+        self.transitions.push(transition);
+    },
+    
+    setInitialState: function(name)
+    {
+        var self = this;
+        
+        if (!(name in self.states))
+        {
+            console.log("InterventionEngine: Initial state name "+name+" not in state list.");
+            return;
+        }
+        
+        self.initialState = name;
+        
+        if (self.currentState === null)
+        {
+            self.currentState = self.initialState;
+        }
+    },
+    
+    setFinalState: function(name)
+    {
+        var self = this;
+        
+        if (!(name in self.states))
+        {
+            console.log("InterventionEngine: Final state name "+name+" not in state list.");
+            return;
+        }
+        
+        if (!self.isFinalState(name))
+        {
+            self.finalStates.push(name);
+        }
+    },
+    
+    isFinalState: function(name)
+    {
+        var self = this;
+        
+        for (var i=0; i<self.finalStates.length; ++i)
+        {
+            if (self.finalStates[i] === name) return true;
+        }
+        return false;
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        
+        $super();
+        
+        self.currentState = self.initialState;
+        self.currentInternalState = self.internalStates.EXECUTING_STATE;
+    },
+    
+    execute: function() //overrides execute method of InterventionEngineState
+    {
+        var self = this;
+        
+        if (self.currentState === null)
+        {
+            console.log("InterventionEngine: Current state is null, cannot execute !");
+            return false;
+        }
+        
+        if (self.currentInternalState == self.internalStates.EXECUTING_STATE)
+        {
+            if (self.states[self.currentState].execute())
+            {
+                self.states[self.currentState].afterExecution(); //call after execution method on state
+                self.currentInternalState = self.internalStates.EXECUTING_TRANSITION; //state returned true, go to transition mode
+            }
+        }
+
+        if (self.currentInternalState == self.internalStates.EXECUTING_TRANSITION)
+        {
+            //iterate through available transitions to check where execution can flow to
+            //priority is given to transitions with event guards that evaluate to true. this is a convention
+            //if anyone later decides that this should be changed, the preferred solution should include the option
+            //to choose the priorities of transitions in case of concurrency (such as order 1,2,3... in the SM GUI)
+
+            var foundAtLeastOneTransition = false;
+            var transitionToExecute = null;
+
+            for (var i=0; i<self.transitions.length; ++i)
+            {
+                //if there is a transition following this state and its guards evaluates to true
+                if ((self.transitions[i].from === self.currentState) && (self.transitions[i].guard.eval(self.eventsHappened, self.memory)) && (
+                                        (!foundAtLeastOneTransition) ||
+                                        (foundAtLeastOneTransition && self.transitions[i].guard.type == "EventGuard")
+                                   ))
+                {
+                    transitionToExecute = self.transitions[i];
+                    foundAtLeastOneTransition = true;
+                }
+            }
+
+            if (foundAtLeastOneTransition)
+            {
+                transitionToExecute.guard.exec(self.memory); //execute any function that may be associated with the transition
+
+                //we have a match, do the transition
+                self.currentState = transitionToExecute.to;
+                self.currentInternalState = self.internalStates.EXECUTING_STATE; //go to state execution mode
+                self.states[self.currentState].beforeExecution();
+            }
+
+            self.clearEvents(); //discard events, because we assume that they have been taken into consideration in this step
+        }
+        
+        if (self.isFinalState(self.currentState))
+        {
+            return true; //continue in higher level
+        }
+        
+        return false; //keep executing
+    },
+    
+    reset: function()
+    {
+        var self = this;
+        
+        self.currentState = null;
+    },
+    
+    sendEvent: function(event)
+    {
+        var self = this;
+        
+        self.eventsHappened.push(event);
+    },
+    
+    clearEvents: function()
+    {
+        var self = this;
+        
+        self.eventsHappened.length = 0;
+    }
+});
+
+//****************************************************************************************************//
+//****************************************************************************************************//
+
+var InterviewAnswer = Class.create
+({
+    initialize: function(id, text, riskScore)
+    {
+        var self = this;
+        
+        self.id = parseInt(id);
+        self.text = text;
+        self.riskScore = parseInt(riskScore);
+    },
+    
+    toString: function()
+    {
+        var self = this;
+        
+        return " ["+self.id+" / risk: "+self.riskScore+"]"+self.text;
+    }
+});
+
+var InterviewQuestion = Class.create
+({
+    initialize: function(id, text)
+    {
+        var self = this;
+        
+        self.id = parseInt(id);
+        self.text = text;
+        self.answers = [];
+    },
+    
+    addAnswer: function(answer)
+    {
+        var self = this;
+        
+        self.answers.push(answer);
+    },
+    
+    getRiskScoreById: function(answerId)
+    {
+        var self = this;
+        
+        for (var i=0; i<self.answers.length; ++i)
+        {
+            if (self.answers[i].id === answerId)
+            {
+                return self.answers[i].riskScore;
+            }
+        }
+        
+        return 0;
+    },
+    
+    toString: function()
+    {
+        var self = this;
+        
+        var result = "["+self.id+"] "+self.text;
+        for (var i=0; i<self.answers.length; ++i)
+        {
+            result += "\n"+self.answers[i].toString();
+        }
+        
+        return result;
+    }
+});
+
+var InterventionScores = Class.create
+({
+    initialize: function(nrOfQuestions)
+    {
+        var self = this;
+
+        self.nrOfQuestions = nrOfQuestions;
+
+        self.answerScores = [];
+        for (var i=0; i<nrOfQuestions; ++i) self.answerScores.push(0);
+    },
+
+    set: function(answerNumber, score)
+    {
+        var self = this;
+
+        self.answerScores[answerNumber] = score;
+    },
+
+    getTotalScore: function()
+    {
+        var self = this;
+
+        var sum = 0;
+        for (var i=0; i<self.nrOfQuestions; ++i)
+        {
+            sum += self.answerScores[i];
+        }
+
+        return sum;
+    }
+});
+
+var Placeholder = Class.create
+({
+    initialize: function(val)
+    {
+        var self = this;
+
+
+
+        if (val === undefined) self.values = [];
+        else self.values = [val];
+
+        //ejhenl001 added below
+        if(val === "VAR_scores_YourDrinking"){
+            console.log("-----------------------------------------");
+            Parse.Cloud.run("calculateAllScores", {}).then(function (e) {
+                self.values = [e.bac.score.yourDrinkingSpeechForCounselor];
+            });
+        }
+    },
+
+
+    addValues : function(value)
+    {
+        var self = this;
+        self.values.push(value);
+    },
+    
+    get : function(index)
+    {
+        var self = this;
+        return self.values[index]; 
+    },
+
+    getRandomValue : function()
+    {
+        var self = this;
+        return self.values[Math.floor(Math.random() * self.values.length)];
+    },
+
+    size : function()
+    {
+        var self = this;
+        return self.values.length;
+    }
+});
+
+//****************************************************************************************************//
+//****************************************************************************************************//
+
+
+
+var ConsiderYourOptions = null;
+var UserRegistration = null;
+var SayPhrase = null;
+var State_TurnOffMicrophone = null;
+var State_Responses_2choices = null;
+var Emotion_Test = null;
+var LookAtYourDrinking = null;
+var DCU_BAC = null;
+var GetFeedback_Dcu2017 = null;
+var ExitStatement_2018 = null;
+var State_Test = null;
+var FB_Depression_2017 = null;
+var State_TurnOnMicrophone = null;
+var State_TestTable = null;
+var GreetNewlyRegisteredUser_2018 = null;
+var Greeting_2018 = null;
+var FB_Dependence_2017 = null;
+var FB_ChancesOfReducing_2017 = null;
+var LookAtYourDrinkingMenu_2017 = null;
+var Branch_NewVsReturningUser = null;
+var SayMultiPhrases = null;
+var VirtualysLipSyncTest = null;
+var ExecMongoElement = null;
+var OtherDrugs_2018 = null;
+var DCU_AuditFeedback = null;
+var AuditFeedback_Module = null;
+var Initial_Intervention_Menu2018 = null;
+var State_Empty = null;
+var HowMuchYouDepend_2018 = null;
+var DCU_BehaviorChangePlanner = null;
+var GetFeedback = null;
+var AuditIntro_V2 = null;
+var State_GetUserRiskScore = null;
+var DCU_GracefullyEndInteraction = null;
+var ReturningUserWelcome_2018 = null;
+var State_CharacterSay = null;
+var Form = null;
+var DCU_CompleteIntervention_2017 = null;
+var FB_GTNSGT_2017 = null;
+var State_ProcessUserAnswer = null;
+var Demo_DynamicSpeech = null;
+var State_DrinkingConsequences = null;
+var DepressedMood_2018 = null;
+var DCU_CompleteIntervention = null;
+var DCU_ReadinessRuler = null;
+var State_ShowElement = null;
+var TestInput = null;
+var Audit_WithResponses = null;
+var FB_Risk_2017 = null;
+var DCU_RegisterUser = null;
+var State_WaitToVerifyUserAnswer = null;
+var ProgramOffer = null;
+var ChancesOfSuccess_2018 = null;
+var HowMuchOftenYouDrink = null;
+var State_BDP_201710 = null;
+var ProcessUserAnswerWithMic = null;
+var MyDrinking_2018 = null;
+var FB_AlcoholRelatedConsequences_2017 = null;
+var DCU_FeedbackModule = null;
+var CharacterSay_UserName = null;
+var SADQC = null;
+var Audit_2018 = null;
+var DCU_OfferProgram = null;
+var Procedure_Tutorial = null;
+var State_ClearHUD = null;
+var State_ResponseDecision_4Choices = null;
+var FB_YourDrinking_2017 = null;
+var State_SaveUserAnswer = null;
+var DCU_DecisionBalanceExercise = null;
+var AlcoholRelatedProblems_2018 = null;
+var Procedure_Get_Feedback = null;
+var State_Demo = null;
+var InterventionModule = null;
+var LikeAndDontLikeAboutDrinking = null;
+var Feedback_Menu_2017 = null;
+var State_BAC = null;
+var getFeedback = null;
+var State_ResponseDecision_Maya_4Choices = null;
+var Audit_Q1_WithRes = null;
+var YourCurrentThinking_2019 = null;
+var Branch_CompleteVsNotComplete = null;
+var State_NotComplete = null;
+var State_NameDefault = null;
+
+
+ConsiderYourOptions = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("Congratulations", new Form(memory, events, resBox, "jOejJI6UrR"));
+        self.addState("Consider Your Options", new Form(memory, events, resBox, "7FmOGjpv7T"));
+        self.addState("Your Current Thinking", new Form(memory, events, resBox, "GRXABvAoQJ"));
+        self.addState("Remaining Exercises", new Form(memory, events, resBox, "wVpnOpHHxo"));
+        self.addState("GoodThingsRevisted", new Form(memory, events, resBox, "Ryah7vLrCE"));
+        self.addState("NotSoGoodRevisited", new Form(memory, events, resBox, "0WsMG5CaTF"));
+        self.addState("RatingProsCons", new Form(memory, events, resBox, "paYuGabMAP"));
+        self.addState("ImportanceYourReasons", new Form(memory, events, resBox, "pV6rClLCG0"));
+        self.addState("GettingWhatYouWant", new Form(memory, events, resBox, "jiYLBrVqI6"));
+        self.addState("GamePlan", new Form(memory, events, resBox, "pQDwjaKuct"));
+        self.addState("Resources", new Form(memory, events, resBox, "74x3bGMONs"));
+        self.addState("AlternativesToWhatYouWant", new Form(memory, events, resBox, "zmoHaOcIqa"));
+        self.addState("YourCurrentThinking", new YourCurrentThinking_2019(memory, events, resBox));
+        self.addTransition("Remaining Exercises", "GoodThingsRevisted");
+        self.addTransition("GoodThingsRevisted", "NotSoGoodRevisited");
+        self.addTransition("NotSoGoodRevisited", "RatingProsCons");
+        self.addTransition("RatingProsCons", "ImportanceYourReasons");
+        self.addTransition("ImportanceYourReasons", "GettingWhatYouWant");
+        self.addTransition("GettingWhatYouWant", "AlternativesToWhatYouWant");
+        self.addTransition("AlternativesToWhatYouWant", "GamePlan");
+        self.addTransition("GamePlan", "Resources");
+        self.addTransition("Resources", "end");
+        self.addTransition("Consider Your Options", "YourCurrentThinking");
+        self.addTransition("YourCurrentThinking", "Remaining Exercises");
+        self.addTransition("start", "Consider Your Options");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+UserRegistration = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("promptNext", new ExecMongoElement(memory, events, resBox, ["s9siIWg60o"], false));
+        self.addState("RegisterLoginIntro", new ExecMongoElement(memory, events, resBox, ["aDnNEFBPzy"], true));
+        self.addTransition("promptNext", "end");
+        self.addTransition("start", "RegisterLoginIntro");
+        self.addTransition("RegisterLoginIntro", "promptNext");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+SayPhrase = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox, placeholder)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("Say", new State_CharacterSay(memory, events, resBox, placeholder));
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addTransition("start", "Say");
+        self.addTransition("Say", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_TurnOffMicrophone = Class.create(InterventionEngineState,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.P_micState = resBox.provided[resBox.names.P_MICSTATE];
+
+    },
+    execute: function()
+    {
+        var self = this;
+        self.P_micState.container.state = false;
+        return true;
+    },
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_Responses_2choices = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("nodeId_3", new ExecMongoElement(memory, events, resBox, ["Qf3UwuyRBG"], false));
+        self.addState("nodeId_4", new ExecMongoElement(memory, events, resBox, ["09ZzF7tJhi"], false));
+        self.addTransition("start", "nodeId_3", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 0;}));
+        self.addTransition("nodeId_3", "end");
+        self.addTransition("nodeId_4", "end");
+        self.addTransition("start", "nodeId_4", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 1;}));
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+Emotion_Test = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("emotionPrompt", new ExecMongoElement(memory, events, resBox, ["ECDY6JYFnn"], false));
+        self.addState("happiness", new ExecMongoElement(memory, events, resBox, ["4k8kiFnBOe"], false));
+        self.addState("sadness", new ExecMongoElement(memory, events, resBox, ["2A6ebEzr2T"], false));
+        self.addState("fear", new ExecMongoElement(memory, events, resBox, ["sTAD640MzD"], false));
+        self.addState("surprise", new ExecMongoElement(memory, events, resBox, ["yR1TsslGvT"], false));
+        self.addState("anger", new ExecMongoElement(memory, events, resBox, ["KW9T2kKE3v"], false));
+        self.addState("disgust", new ExecMongoElement(memory, events, resBox, ["aNd0UZHAju"], false));
+        self.addState("contempt", new ExecMongoElement(memory, events, resBox, ["H1e5eJVxQS"], false));
+        self.addTransition("start", "emotionPrompt");
+        self.addTransition("emotionPrompt", "end", new ConditionGuard(function(m){return m["lastUserAnswerId"] > 6;}));
+        self.addTransition("emotionPrompt", "happiness", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 0;}));
+        self.addTransition("happiness", "emotionPrompt");
+        self.addTransition("emotionPrompt", "sadness", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 1;}));
+        self.addTransition("sadness", "emotionPrompt");
+        self.addTransition("emotionPrompt", "fear", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 2;}));
+        self.addTransition("fear", "emotionPrompt");
+        self.addTransition("emotionPrompt", "surprise", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 3;}));
+        self.addTransition("surprise", "emotionPrompt");
+        self.addTransition("emotionPrompt", "anger", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 4;}));
+        self.addTransition("anger", "emotionPrompt");
+        self.addTransition("emotionPrompt", "disgust", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 5;}));
+        self.addTransition("disgust", "emotionPrompt");
+        self.addTransition("emotionPrompt", "contempt", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 6;}));
+        self.addTransition("contempt", "emotionPrompt");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+LookAtYourDrinking = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("Audit", new Form(memory, events, resBox, "FS0pvWxhQI"));
+        self.addState("HowMuchHowOftenYouDrink", new HowMuchOftenYouDrink(memory, events, resBox));
+        self.addState("LikeAndDontLikeAboutDrinking", new LikeAndDontLikeAboutDrinking(memory, events, resBox));
+        self.addState("AlcoholRelatedProblems_2018", new AlcoholRelatedProblems_2018(memory, events, resBox));
+        self.addState("DepressedMood_2018", new DepressedMood_2018(memory, events, resBox));
+        self.addState("ChancesOfSuccess_2018", new ChancesOfSuccess_2018(memory, events, resBox));
+        self.addState("HowMuchYouDepend_2018", new HowMuchYouDepend_2018(memory, events, resBox));
+        self.addState("LookAtDrinkingMenu_New", new LookAtYourDrinkingMenu_2017(memory, events, resBox));
+        self.addState("IntroText", new ExecMongoElement(memory, events, resBox, ["aJJOTnvmTl"], false));
+        self.addTransition("LookAtDrinkingMenu_New", "LikeAndDontLikeAboutDrinking", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 0;}));
+        self.addTransition("LikeAndDontLikeAboutDrinking", "LookAtDrinkingMenu_New");
+        self.addTransition("LookAtDrinkingMenu_New", "end", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 7;}));
+        self.addTransition("LookAtDrinkingMenu_New", "Audit", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 1;}));
+        self.addTransition("LookAtDrinkingMenu_New", "HowMuchHowOftenYouDrink", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 2;}));
+        self.addTransition("HowMuchHowOftenYouDrink", "LookAtDrinkingMenu_New");
+        self.addTransition("LookAtDrinkingMenu_New", "DepressedMood_2018", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 4;}));
+        self.addTransition("DepressedMood_2018", "LookAtDrinkingMenu_New");
+        self.addTransition("LookAtDrinkingMenu_New", "ChancesOfSuccess_2018", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 5;}));
+        self.addTransition("ChancesOfSuccess_2018", "LookAtDrinkingMenu_New");
+        self.addTransition("LookAtDrinkingMenu_New", "HowMuchYouDepend_2018", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 6;}));
+        self.addTransition("HowMuchYouDepend_2018", "LookAtDrinkingMenu_New");
+        self.addTransition("Audit", "LookAtDrinkingMenu_New");
+        self.addTransition("LookAtDrinkingMenu_New", "AlcoholRelatedProblems_2018", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 3;}));
+        self.addTransition("AlcoholRelatedProblems_2018", "LookAtDrinkingMenu_New");
+        self.addTransition("start", "IntroText");
+        self.addTransition("IntroText", "LookAtDrinkingMenu_New");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+DCU_BAC = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("1", new ExecMongoElement(memory, events, resBox, ["4c7NrYkuhw"], false));
+        self.addState("2", new ExecMongoElement(memory, events, resBox, ["OTCuAIIJCd"], false));
+        self.addState("3", new ExecMongoElement(memory, events, resBox, ["8E2eDh9Zy1"], false));
+        self.addState("4", new ExecMongoElement(memory, events, resBox, ["AcHuq4UKBD"], false));
+        self.addState("5", new ExecMongoElement(memory, events, resBox, ["BqModqzkOV"], false));
+        self.addState("6", new ExecMongoElement(memory, events, resBox, ["Hy4OGAaHID"], false));
+        self.addState("7", new ExecMongoElement(memory, events, resBox, ["BzGyElOC61"], false));
+        self.addState("8", new ExecMongoElement(memory, events, resBox, ["kODLDHCUvB"], false));
+        self.addState("9", new ExecMongoElement(memory, events, resBox, ["xc6LdfVfjc"], false));
+        self.addState("OptionD", new ExecMongoElement(memory, events, resBox, ["YKafjxpwhU"], false));
+        self.addState("OptionC", new ExecMongoElement(memory, events, resBox, ["A7racDWWLZ"], false));
+        self.addState("OptionB", new ExecMongoElement(memory, events, resBox, ["MGAKPII4hJ"], false));
+        self.addState("OptionA", new ExecMongoElement(memory, events, resBox, ["ZJxmohE7gx"], false));
+        self.addTransition("start", "1");
+        self.addTransition("1", "2");
+        self.addTransition("2", "3");
+        self.addTransition("3", "4");
+        self.addTransition("4", "5");
+        self.addTransition("5", "6");
+        self.addTransition("6", "7");
+        self.addTransition("7", "8");
+        self.addTransition("8", "9");
+        self.addTransition("9", "OptionA", new ConditionGuard(function(m){return m["lastUserAnswerId"]==0;}));
+        self.addTransition("9", "OptionB", new ConditionGuard(function(m){return m["lastUserAnswerId"]==1;}));
+        self.addTransition("9", "OptionC", new ConditionGuard(function(m){return m["lastUserAnswerId"]==2;}));
+        self.addTransition("9", "OptionD", new ConditionGuard(function(m){return m["lastUserAnswerId"]==3;}));
+        self.addTransition("OptionA", "end");
+        self.addTransition("OptionB", "end");
+        self.addTransition("OptionC", "end");
+        self.addTransition("OptionD", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+GetFeedback_Dcu2017 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("MainMenu", new ExecMongoElement(memory, events, resBox, ["Ehm9q3Anfo"], ));
+        self.addState("GTNSGT", new Form(memory, events, resBox, "27cMBz2cEp"));
+        self.addState("YourDrinking", new Form(memory, events, resBox, ));
+        self.addState("AlcoholRelatedConsequences", new Form(memory, events, resBox, ));
+        self.addState("Dependence", new Form(memory, events, resBox, ));
+        self.addState("Risk", new Form(memory, events, resBox, ));
+        self.addState("ChancesOfReducing", new Form(memory, events, resBox, ));
+        self.addState("Depression", new Form(memory, events, resBox, ));
+        self.addTransition("start", "MainMenu");
+        self.addTransition("MainMenu", "end");
+        self.addTransition("MainMenu", "GTNSGT");
+        self.addTransition("GTNSGT", "MainMenu");
+        self.addTransition("MainMenu", "YourDrinking");
+        self.addTransition("YourDrinking", "MainMenu");
+        self.addTransition("MainMenu", "AlcoholRelatedConsequences");
+        self.addTransition("AlcoholRelatedConsequences", "MainMenu");
+        self.addTransition("MainMenu", "Dependence");
+        self.addTransition("Dependence", "MainMenu");
+        self.addTransition("MainMenu", "Risk");
+        self.addTransition("Risk", "MainMenu");
+        self.addTransition("MainMenu", "ChancesOfReducing");
+        self.addTransition("ChancesOfReducing", "MainMenu");
+        self.addTransition("MainMenu", "Depression");
+        self.addTransition("Depression", "MainMenu");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+ExitStatement_2018 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("exitStatement", new ExecMongoElement(memory, events, resBox, ["gBJA4r0aDF"], false));
+        self.addState("closeBrowserStatement", new ExecMongoElement(memory, events, resBox, ["kHaKbotv4Z"], false));
+        self.addTransition("start", "exitStatement");
+        self.addTransition("exitStatement", "closeBrowserStatement");
+        self.addTransition("closeBrowserStatement", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_Test = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("1", new ExecMongoElement(memory, events, resBox, ["MXfzhHZj1l"], false));
+        self.addTransition("start", "1");
+        self.addTransition("1", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+FB_Depression_2017 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("personalizedFeedback", new SayPhrase(memory, events, resBox, ));
+        self.addState("fullScreen", new ExecMongoElement(memory, events, resBox, ["iyk5neegkH"], false));
+        self.addState("prompt", new ExecMongoElement(memory, events, resBox, ["sU9uIMyRTM"], false));
+        self.addState("htmlContent", new ExecMongoElement(memory, events, resBox, ["H0lh27tdjq"], false));
+        self.addTransition("start", "htmlContent");
+        self.addTransition("htmlContent", "prompt");
+        self.addTransition("personalizedFeedback", "prompt");
+        self.addTransition("prompt", "fullScreen");
+        self.addTransition("fullScreen", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_TurnOnMicrophone = Class.create(InterventionEngineState,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.P_micState = resBox.provided[resBox.names.P_MICSTATE];
+
+    },
+    execute: function()
+    {
+        var self = this;
+        self.P_micState.container.state = true;
+        return true;
+    },
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_TestTable = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("1", new ExecMongoElement(memory, events, resBox, ["tkce6b0Y6P"], false));
+        self.addState("2", new ExecMongoElement(memory, events, resBox, ["MxdNQMjjka"], false));
+        self.addTransition("start", "1");
+        self.addTransition("1", "2");
+        self.addTransition("2", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+GreetNewlyRegisteredUser_2018 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.angularScope = null;
+        var getAngularElement = function() {	
+        
+            var appElement = document.querySelector('[id=elementPanel]');
+            var scope = angular.element(appElement).scope();
+        
+            if(scope === undefined){
+        
+                setTimeout(function(){
+                    getAngularElement();
+                }, 10);
+                return;
+            }
+            self.angularScope = scope;         
+        }
+        getAngularElement();
+        
+        let userName = self.angularScope.userGivenName;
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("sayPhrase", new SayPhrase(memory, events, resBox, new Placeholder("Thank you for taking the time to do that."+  userName)));
+        self.addState("codedText", new ExecMongoElement(memory, events, resBox, ["DShMQdrOlX"], false));
+        self.addState("Greeting with Username", new CharacterSay_UserName(memory, events, resBox, ));
+        self.addTransition("codedText", "end");
+        self.addTransition("start", "Greeting with Username");
+        self.addTransition("Greeting with Username", "codedText");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+Greeting_2018 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.angularScope = null;
+        var getAngularElement = function() {	
+        
+            var appElement = document.querySelector('[id=elementPanel]');
+            var scope = angular.element(appElement).scope();
+        
+            if(scope === undefined){
+        
+                setTimeout(function(){
+                    getAngularElement();
+                }, 10);
+                return;
+            }
+            self.angularScope = scope;         
+        }
+        getAngularElement();
+        
+        let counselorName = self.angularScope.$parent.$parent.$parent.$root.$root.selectedCounselor.name;
+        let userName = self.angularScope.userGivenName;
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("sayPhrase", new SayPhrase(memory, events, resBox, new Placeholder("Hello" + userName+ "I am" + counselorName+ "It is a pleasure to meet you!")));
+        self.addState("codedText", new Form(memory, events, resBox, "KARZgj3IxB"));
+        self.addTransition("start", "sayPhrase");
+        self.addTransition("sayPhrase", "codedText");
+        self.addTransition("codedText", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+FB_Dependence_2017 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("personalizedFeedback", new SayPhrase(memory, events, resBox, ));
+        self.addState("fullScreen", new ExecMongoElement(memory, events, resBox, ["457ntcKmDh"], false));
+        self.addState("prompt", new ExecMongoElement(memory, events, resBox, ["HBfb5fbdZn"], false));
+        self.addState("htmlContent", new ExecMongoElement(memory, events, resBox, ["UgGY02sQGN"], false));
+        self.addTransition("start", "htmlContent");
+        self.addTransition("htmlContent", "prompt");
+        self.addTransition("personalizedFeedback", "prompt");
+        self.addTransition("prompt", "fullScreen");
+        self.addTransition("fullScreen", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+FB_ChancesOfReducing_2017 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("fullScreen", new ExecMongoElement(memory, events, resBox, ["9RG2lgJ84C"], false));
+        self.addState("prompt", new ExecMongoElement(memory, events, resBox, ["qRebJyfsIu"], false));
+        self.addState("htmlContent", new ExecMongoElement(memory, events, resBox, ["U2CiWkdh1E"], false));
+        self.addState("personalizedFeedback", new SayPhrase(memory, events, resBox, ));
+        self.addTransition("start", "htmlContent");
+        self.addTransition("htmlContent", "prompt");
+        self.addTransition("personalizedFeedback", "prompt");
+        self.addTransition("prompt", "fullScreen");
+        self.addTransition("fullScreen", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+LookAtYourDrinkingMenu_2017 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("ChooseText", new ExecMongoElement(memory, events, resBox, ["aO6qCMcRvH"], false));
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addTransition("ChooseText", "end");
+        self.addTransition("start", "ChooseText");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+Branch_NewVsReturningUser = Class.create(InterventionEngineState,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.angularScope = null;
+        var getAngularElement = function() {	
+        
+            var appElement = document.querySelector('[id=userContext]');
+            var scope = angular.element(appElement).scope();
+        
+            if(scope === undefined){
+        
+                setTimeout(function(){
+                    getAngularElement();
+                }, 10);
+                return;
+            }
+            self.angularScope = scope;         
+        }
+        getAngularElement();
+        
+        //console.log("scope in the sMachine");
+        //console.log(self.angularScope);
+
+    },
+    execute: function()
+    {
+        var self = this;
+        // console.log("bypassAudit:");
+        // console.log(self.memory["bypassAudit"]);
+        
+        return self.memory["bypassAudit"];
+    },
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        self.memory["bypassAudit"] = 1;
+        if(self.angularScope.currentUserProgress != null){
+        if(self.angularScope.currentUserProgress.attributes.audit.length > 1 && !self.angularScope.currentUser.object.attributes.tempUser){
+            self.memory["bypassAudit"] = 2;
+        }
+        }
+    }
+});
+
+SayMultiPhrases = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox, placeholders)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.index=0;
+        self.placeholders = placeholders;
+        
+        self.usedPlaceholder = new Placeholder("");
+        
+        self.P_elemIteration = resBox.provided[resBox.names.P_ELEMENTITERATION];
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("Say", new SayPhrase(memory, events, resBox, self.usedPlaceholder));
+        self.addState("CheckEnd", new State_Empty(memory, events, resBox));
+        self.addTransition("Say", "CheckEnd", new ConditionGuard(function(m){return true;}, function(m){self.index++;}));
+        self.addTransition("CheckEnd", "Say", new ConditionGuard(function(m){return (self.index<self.placeholders.length);}, function(m){self.usedPlaceholder.values = self.placeholders[self.index].values;self.P_elemIteration.container.iter++;}));
+        self.addTransition("CheckEnd", "end", new ConditionGuard(function(m){return (self.index>=self.placeholders.length);}, function(m){self.P_elemIteration.container.iter=0;}));
+        self.addTransition("start", "Say", new ConditionGuard(function(m){return true;}, function(m){self.usedPlaceholder.values = self.placeholders[self.index].values; self.P_elemIteration.container.iter=0;}));
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        self.index=0; //reset to 0
+    }
+});
+
+VirtualysLipSyncTest = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.sayThis = new Placeholder("");
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("enter text", new ExecMongoElement(memory, events, resBox, ["57b77859ddf0b55dff0cd1f6"], false));
+        self.addState("nodeId_5", new SayPhrase(memory, events, resBox, self.sayThis));
+        self.addTransition("start", "enter text");
+        self.addTransition("nodeId_5", "enter text");
+        self.addTransition("enter text", "nodeId_5", new ConditionGuard(function(m){return true;}, function(m){self.sayThis.values[0]=self.memory["lastUserAnswerId"];}));
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+ExecMongoElement = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox, elemIDref, canGoBack)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.canGoBack = canGoBack;
+        self.elemIDref = elemIDref;
+        self.elementJSONref = [{}];
+        self.spokenPlaceholders = [];
+        self.dataLoaded = false;
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("ShowElement", new State_ShowElement(memory, events, resBox, self.elementJSONref));
+        self.addState("WaitToVerifiyUserAnswer", new State_WaitToVerifyUserAnswer(memory, events, resBox, 2000, ["no", "not", "stop", "wait", "well", "actually"]));
+        self.addState("ShowElementAgain", new State_ShowElement(memory, events, resBox, self.elementJSONref));
+        self.addState("CheckValidGoBack", new State_Empty(memory, events, resBox));
+        self.addState("AnswerNotValidated", new State_CharacterSay(memory, events, resBox, resBox.placeholders["ResetAnswerChoice"]));
+        self.addState("SayNotGoingBack", new SayPhrase(memory, events, resBox, new Placeholder("Oh, ok!")));
+        self.addState("VerifyGoBack", new SayPhrase(memory, events, resBox, new Placeholder("Do you want to go back one question ?")));
+        self.addState("SayPlaceholders", new SayMultiPhrases(memory, events, resBox, self.spokenPlaceholders));
+        self.addState("ProcessUserAnswer", new State_ProcessUserAnswer(memory, events, resBox, self.elementJSONref));
+        self.addState("MicOn", new State_TurnOnMicrophone(memory, events, resBox));
+        self.addState("MicOff", new State_TurnOffMicrophone(memory, events, resBox));
+        self.addState("SaveUserAnswer", new State_SaveUserAnswer(memory, events, resBox));
+        self.addTransition("start", "ShowElement", new ConditionGuard(function(m){return self.dataLoaded;}));
+        self.addTransition("WaitToVerifiyUserAnswer", "AnswerNotValidated", new ConditionGuard(function(m){return !m["answerVerified"];}));
+        self.addTransition("AnswerNotValidated", "ShowElementAgain");
+        self.addTransition("SayNotGoingBack", "ShowElementAgain");
+        self.addTransition("VerifyGoBack", "SayNotGoingBack", new EventGuard("goBackOneQuestionCanceled", function(m){console.log("User cancelled backward movement");}));
+        self.addTransition("CheckValidGoBack", "VerifyGoBack", new ConditionGuard(function(m){return self.canGoBack;}, function(m){console.log("Validating user command to go back");}));
+        self.addTransition("ShowElement", "SayPlaceholders", new ConditionGuard(function(m){return (["Content"].indexOf(m["mongoElementType"]) < 0);}));
+        self.addTransition("SayPlaceholders", "end", new ConditionGuard(function(m){return ["feedback", "feedbackList"].indexOf(m["mongoElementType"]) >= 0;}));
+        self.addTransition("ProcessUserAnswer", "ProcessUserAnswer", new ConditionGuard(function(m){return m["lastUserAnswerId"]==null;}));
+        self.addTransition("ProcessUserAnswer", "WaitToVerifiyUserAnswer", new ConditionGuard(function(m){return m["lastUserAnswerId"]!=null;}));
+        self.addTransition("SayPlaceholders", "MicOn", new ConditionGuard(function(m){return (["feedback", "feedbackList"].indexOf(m["mongoElementType"]) < 0);}));
+        self.addTransition("MicOn", "ProcessUserAnswer");
+        self.addTransition("CheckValidGoBack", "ProcessUserAnswer", new EventGuard("return !self.canGoBack;"));
+        self.addTransition("ShowElementAgain", "ProcessUserAnswer");
+        self.addTransition("VerifyGoBack", "MicOff", new EventGuard("goBackOneQuestionConfirmed", function(m){m["goBackOneQuestion"]=true;console.log("User granted permission to go backward");}));
+        self.addTransition("MicOff", "end");
+        self.addTransition("WaitToVerifiyUserAnswer", "SaveUserAnswer", new ConditionGuard(function(m){return m["answerVerified"];}));
+        self.addTransition("SaveUserAnswer", "MicOff");
+        self.addTransition("ShowElement", "end", new ConditionGuard(function(m){return (["Content"].indexOf(m["mongoElementType"]) >= 0);}));
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        self.memory["goBackOneQuestion"] = false;
+        self.dataLoaded = false;
+        
+        //TODO: make generic
+        
+        self.spokenPlaceholders.length = 0;
+        self.dataType = "";
+        self.memory["mongoElementType"] = self.dataType;
+        self.memory["mongoElementId"] = -1;
+        
+        var Element = Parse.Object.extend('Element');
+        
+        var newQuery = new Parse.Query(Element);
+        newQuery.equalTo('objectId', self.elemIDref[0]);
+        
+        var oldQuery = new Parse.Query(Element);
+        oldQuery.equalTo('oldId', self.elemIDref[0]);
+        
+        var query = new Parse.Query.or(newQuery, oldQuery);
+        
+        query.first({
+            success: function (doc) {
+                var elem = {
+                    object: doc,
+                    id: doc.id,
+                    type: doc.get('type'),
+                    phrase: doc.get('phrase'),
+                    content: doc.get('content'),
+                    oldId: doc.get('oldId'),
+                    form: doc.get('form'),
+                    html: doc.get('html'),
+                    lang: doc.get('lang'),
+                    order: doc.get('order')
+                };
+        
+                self.dataType = elem.type;
+                self.memory["mongoElementType"] = self.dataType;
+                self.memory["mongoElementId"] = self.elemIDref[0];
+                self.elementJSONref[0] = elem;
+        
+                elem.phrase.forEach(function(phrase) {
+                    self.spokenPlaceholders.push(new Placeholder(phrase));
+                });
+        
+                if (elem.type == "QuestionAnswer") {}
+                else if (elem.type == "QuestionAnswer-Checkbox")
+                {
+                    console.log("QuestionAnswer-Checkbox not implemented in ExecMongoElem");
+                }
+                else if (elem.type == "textArea")
+                {
+                    console.log("textArea not implemented in ExecMongoElem");
+                }
+                else if (elem.type == "feedback") {}
+                else if (elem.type == "TabularInput"){}
+                else if (elem.type == "feedbackList") {}
+        
+                self.dataLoaded = true;
+            },
+            error: function (err) {
+                console.log(err);
+            }
+        });
+    }
+});
+
+OtherDrugs_2018 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("q1", new ExecMongoElement(memory, events, resBox, ["nrFKqQekln"], false));
+        self.addState("q2", new ExecMongoElement(memory, events, resBox, ["BmqCFA3LpF"], true));
+        self.addState("q3", new ExecMongoElement(memory, events, resBox, ["XTxMZ7TJ4h"], true));
+        self.addState("r_q3_Maya", new ExecMongoElement(memory, events, resBox, ["DmQoGxuLT3"], true));
+        self.addTransition("start", "q1");
+        self.addTransition("q1", "q2");
+        self.addTransition("q2", "q3");
+        self.addTransition("q3", "r_q3_Maya");
+        self.addTransition("r_q3_Maya", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+DCU_AuditFeedback = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("intro", new ExecMongoElement(memory, events, resBox, ["7BEL0bb43x"], false));
+        self.addState("promptForFeedback", new ExecMongoElement(memory, events, resBox, ["4blyxYhCUH"], false));
+        self.addState("lowRisk", new ExecMongoElement(memory, events, resBox, ["uepDUrOFGR"], false));
+        self.addState("medRisk", new ExecMongoElement(memory, events, resBox, ["WTdwRcYCC7"], false));
+        self.addState("highRisk", new ExecMongoElement(memory, events, resBox, ["yUyXfNUCXI"], false));
+        self.addState("calculateRiskScore", new State_GetUserRiskScore(memory, events, resBox));
+        self.addTransition("start", "intro");
+        self.addTransition("intro", "promptForFeedback");
+        self.addTransition("lowRisk", "end", new ConditionGuard(function(m){return true;}, function(m){m["DCUFeedbackUserDecision"] =1;}));
+        self.addTransition("medRisk", "end");
+        self.addTransition("highRisk", "end");
+        self.addTransition("promptForFeedback", "calculateRiskScore", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 0;}, function(m){m["DCUFeedbackUserDecision"] = 0;}));
+        self.addTransition("calculateRiskScore", "lowRisk", new ConditionGuard(function(m){return (m["currentFormRiskScore"] <= 8);}));
+        self.addTransition("calculateRiskScore", "medRisk", new ConditionGuard(function(m){return (m["currentFormRiskScore"] > 8 && m["currentFormRiskScore"] <= 13);}));
+        self.addTransition("calculateRiskScore", "highRisk", new ConditionGuard(function(m){return (m["currentFormRiskScore"] > 13);}));
+        self.addTransition("promptForFeedback", "end", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 1;}, function(m){m["DCUFeedbackUserDecision"] = 1;}));
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        self.memory["DCUFeedbackUserDecision"] = 0;
+    }
+});
+
+AuditFeedback_Module = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("intro", new ExecMongoElement(memory, events, resBox, ["7BEL0bb43x"], false));
+        self.addState("lowRisk", new ExecMongoElement(memory, events, resBox, ["uepDUrOFGR"], false));
+        self.addState("promptForFeedback", new ExecMongoElement(memory, events, resBox, ["4blyxYhCUH"], false));
+        self.addState("highRisk", new ExecMongoElement(memory, events, resBox, ["yUyXfNUCXI"], false));
+        self.addState("medRisk", new ExecMongoElement(memory, events, resBox, ["WTdwRcYCC7"], false));
+        self.addState("calculateRiskScore", new State_GetUserRiskScore(memory, events, resBox));
+        self.addTransition("start", "intro");
+        self.addTransition("intro", "promptForFeedback");
+        self.addTransition("lowRisk", "end");
+        self.addTransition("medRisk", "end");
+        self.addTransition("highRisk", "end");
+        self.addTransition("promptForFeedback", "end", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 1;}, function(m){m["DCUFeedbackUserDecision"] = 1;}));
+        self.addTransition("calculateRiskScore", "lowRisk", new ConditionGuard(function(m){return (m["currentFormRiskScore"] <= 8);}));
+        self.addTransition("calculateRiskScore", "medRisk", new ConditionGuard(function(m){return (m["currentFormRiskScore"] > 8 && m["currentFormRiskScore"] <= 13);}));
+        self.addTransition("calculateRiskScore", "highRisk", new ConditionGuard(function(m){return (m["currentFormRiskScore"] > 13);}));
+        self.addTransition("promptForFeedback", "calculateRiskScore", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 0;}, function(m){m["DCUFeedbackUserDecision"] = 0;}));
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+Initial_Intervention_Menu2018 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("Menu", new ExecMongoElement(memory, events, resBox, ["4lHNsBzB0x"], false));
+        self.addTransition("start", "Menu");
+        self.addTransition("Menu", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_Empty = Class.create(InterventionEngineState,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+
+    },
+    execute: function()
+    {
+        var self = this;
+        //nothing
+        return true;
+    },
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+HowMuchYouDepend_2018 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("O1", new ExecMongoElement(memory, events, resBox, ["4EQE0ciWeP"], false));
+        self.addState("q0", new ExecMongoElement(memory, events, resBox, ["IJcTOH7fGb"], false));
+        self.addState("q1", new ExecMongoElement(memory, events, resBox, ["JrWYjpNoTq"], true));
+        self.addState("q2", new ExecMongoElement(memory, events, resBox, ["entTOZcC7x"], true));
+        self.addState("q3", new ExecMongoElement(memory, events, resBox, ["jSbe0y9yo8"], true));
+        self.addState("q4", new ExecMongoElement(memory, events, resBox, ["UwhNedrfDF"], true));
+        self.addState("q5", new ExecMongoElement(memory, events, resBox, ["brRbraVeTe"], true));
+        self.addState("q6", new ExecMongoElement(memory, events, resBox, ["tpEo1xFKXk"], true));
+        self.addState("q7", new ExecMongoElement(memory, events, resBox, ["pKnT4rw0q0"], true));
+        self.addState("q8", new ExecMongoElement(memory, events, resBox, ["f5poCM6Gwq"], true));
+        self.addState("q9", new ExecMongoElement(memory, events, resBox, ["WfgNctUyc9"], true));
+        self.addState("q10", new ExecMongoElement(memory, events, resBox, ["uLqHs3Cdon"], true));
+        self.addState("q11", new ExecMongoElement(memory, events, resBox, ["VtxPtGv9Vv"], true));
+        self.addState("q12", new ExecMongoElement(memory, events, resBox, ["RnNNlOBTQd"], true));
+        self.addState("q13", new ExecMongoElement(memory, events, resBox, ["ZBV1DmYjhP"], true));
+        self.addState("q14", new ExecMongoElement(memory, events, resBox, ["EvAGJWHkWQ"], true));
+        self.addState("q15", new ExecMongoElement(memory, events, resBox, ["DRMwnfMBq2"], true));
+        self.addState("q16", new ExecMongoElement(memory, events, resBox, ["Z6SYhFUMv7"], true));
+        self.addState("q17", new ExecMongoElement(memory, events, resBox, ["10oWTuZIat"], true));
+        self.addState("q18", new ExecMongoElement(memory, events, resBox, ["APluU5Dc6l"], true));
+        self.addState("q19", new ExecMongoElement(memory, events, resBox, ["IISlXLUAzC"], true));
+        self.addState("q20", new ExecMongoElement(memory, events, resBox, ["wNj7vCeMXz"], true));
+        self.addState("r_q3", new State_ResponseDecision_4Choices(memory, events, resBox));
+        self.addState("r_q9", new State_ResponseDecision_4Choices(memory, events, resBox));
+        self.addState("r_q15", new State_ResponseDecision_4Choices(memory, events, resBox));
+        self.addState("r_q20", new State_ResponseDecision_4Choices(memory, events, resBox));
+        self.addState("r_q1_Maya", new State_ResponseDecision_Maya_4Choices(memory, events, resBox));
+        self.addState("r_q5_Maya", new State_ResponseDecision_Maya_4Choices(memory, events, resBox));
+        self.addState("r_q13_Maya", new State_ResponseDecision_Maya_4Choices(memory, events, resBox));
+        self.addState("r_q16_Maya", new State_ResponseDecision_Maya_4Choices(memory, events, resBox));
+        self.addState("thankYouStatement", new ExecMongoElement(memory, events, resBox, ["zJ5XZ33e2H"], true));
+        self.addTransition("start", "O1");
+        self.addTransition("O1", "q0");
+        self.addTransition("q0", "q1", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 0;}));
+        self.addTransition("q0", "end", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 1;}));
+        self.addTransition("q2", "q3");
+        self.addTransition("q3", "r_q3");
+        self.addTransition("r_q3", "q4");
+        self.addTransition("q4", "q5");
+        self.addTransition("q6", "q7");
+        self.addTransition("q7", "q8");
+        self.addTransition("q8", "q9");
+        self.addTransition("q9", "r_q9");
+        self.addTransition("r_q9", "q10");
+        self.addTransition("q10", "q11");
+        self.addTransition("q11", "q12");
+        self.addTransition("q12", "q13");
+        self.addTransition("q14", "q15");
+        self.addTransition("q15", "r_q15");
+        self.addTransition("r_q15", "q16");
+        self.addTransition("q17", "q18");
+        self.addTransition("q18", "q19");
+        self.addTransition("q19", "q20");
+        self.addTransition("q20", "r_q20");
+        self.addTransition("q1", "r_q1_Maya");
+        self.addTransition("r_q1_Maya", "q2");
+        self.addTransition("q5", "r_q5_Maya");
+        self.addTransition("r_q5_Maya", "q6");
+        self.addTransition("q13", "r_q13_Maya");
+        self.addTransition("r_q13_Maya", "q14");
+        self.addTransition("q16", "r_q16_Maya");
+        self.addTransition("r_q16_Maya", "q17");
+        self.addTransition("r_q20", "thankYouStatement");
+        self.addTransition("thankYouStatement", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+DCU_BehaviorChangePlanner = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("Remaining Excercises", new Form(memory, events, resBox, "XfdwsYnBKy"));
+        self.addState("Not So Good Things Revisited", new Form(memory, events, resBox, "sK340kobCl"));
+        self.addState("Rating Pros and Cons", new Form(memory, events, resBox, "qt7SumHIIh"));
+        self.addState("Good Things Revisited", new Form(memory, events, resBox, "8vRCIU5JZc"));
+        self.addState("Modified Game Plan", new Form(memory, events, resBox, "ejoX84fzAA"));
+        self.addState("Alternatives to Getting Where You Want", new Form(memory, events, resBox, "by5Ccscxn9"));
+        self.addState("Getting What You Want", new Form(memory, events, resBox, "pzkO0sd193"));
+        self.addState("The Importance of Your Reasons", new Form(memory, events, resBox, "Em81qRnfZq"));
+        self.addState("Game Plan Overview", new Form(memory, events, resBox, "BBr54kWhup"));
+        self.addTransition("start", "Remaining Excercises");
+        self.addTransition("Not So Good Things Revisited", "Rating Pros and Cons");
+        self.addTransition("Remaining Excercises", "Good Things Revisited");
+        self.addTransition("Good Things Revisited", "Not So Good Things Revisited");
+        self.addTransition("Rating Pros and Cons", "The Importance of Your Reasons");
+        self.addTransition("The Importance of Your Reasons", "Getting What You Want");
+        self.addTransition("Getting What You Want", "Alternatives to Getting Where You Want");
+        self.addTransition("Alternatives to Getting Where You Want", "Modified Game Plan");
+        self.addTransition("Modified Game Plan", "Game Plan Overview");
+        self.addTransition("Game Plan Overview", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+GetFeedback = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("FeedbackIntro", new Form(memory, events, resBox, "rc0V1xjAjz"));
+        self.addState("TourFeedbackPrompt", new Form(memory, events, resBox, "aDCHrim2WZ"));
+        self.addState("Todo guided tour", new SayPhrase(memory, events, resBox, new Placeholder("TODO guided Tour")));
+        self.addState("Get Feedback", new getFeedback(memory, events, resBox));
+        self.addState("Get Feedback Leadin", new ExecMongoElement(memory, events, resBox, ["PgtQU6DazV"], false));
+        self.addTransition("TourFeedbackPrompt", "Todo guided tour", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 0;}));
+        self.addTransition("Get Feedback", "end");
+        self.addTransition("TourFeedbackPrompt", "Get Feedback Leadin", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 1;}));
+        self.addTransition("Todo guided tour", "Get Feedback Leadin");
+        self.addTransition("Get Feedback Leadin", "Get Feedback");
+        self.addTransition("start", "Get Feedback Leadin");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+AuditIntro_V2 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("nodeId_3", new ExecMongoElement(memory, events, resBox, ["dL594CNJB0"], false));
+        self.addState("nodeId_4", new ExecMongoElement(memory, events, resBox, ["VY6qg0L1Xk"], false));
+        self.addState("nodeId_5", new ExecMongoElement(memory, events, resBox, ["6hmKSNHOv3"], false));
+        self.addTransition("nodeId_3", "nodeId_4");
+        self.addTransition("start", "nodeId_3");
+        self.addTransition("nodeId_4", "nodeId_5");
+        self.addTransition("nodeId_5", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_GetUserRiskScore = Class.create(InterventionEngineState,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        var getAngularElement = function() {	
+        
+            var appElement = document.querySelector('[id=userContext]');
+            var scope = angular.element(appElement).scope();
+        
+            if(scope === undefined){
+        
+                setTimeout(function(){
+                    getAngularElement();
+                }, 10);
+                return;
+            }
+            self.angularScope = scope;         
+        }
+        getAngularElement();
+
+    },
+    execute: function()
+    {
+        var self = this;
+        return self.memory["currentFormRiskScore"];
+    },
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        Parse.Cloud.run("calculateAllScores", {}).then(function (e) {
+               var score = e.audit.score.auditScore;
+                if ( !(score > 0) ){
+                     score = 1;
+                }
+               self.memory["currentFormRiskScore"] = score;
+               console.log("score: " + self.memory["currentFormRiskScore"]);
+        })
+    }
+});
+
+DCU_GracefullyEndInteraction = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("Resources", new Form(memory, events, resBox, "Na31wu8dpb"));
+        self.addTransition("start", "Resources");
+        self.addTransition("Resources", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+ReturningUserWelcome_2018 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.angularScope = null;
+        var getAngularElement = function() {	
+        
+            var appElement = document.querySelector('[id=elementPanel]');
+            var scope = angular.element(appElement).scope();
+        
+            if(scope === undefined){
+        
+                setTimeout(function(){
+                    getAngularElement();
+                }, 10);
+                return;
+            }
+            self.angularScope = scope;         
+        }
+        getAngularElement();
+        
+        let counselorName = self.angularScope.$parent.$parent.$parent.$root.$root.selectedCounselor.name;
+        let userName = self.angularScope.userGivenName;
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("sayPhrase", new SayPhrase(memory, events, resBox, new Placeholder("Welcome back."+  userName   + "Just in case you forgot, I am " + counselorName + ".  It is nice to see you again!")));
+        self.addState("codedText", new Form(memory, events, resBox, "NHsLdynMtx"));
+        self.addTransition("codedText", "end");
+        self.addTransition("sayPhrase", "codedText");
+        self.addTransition("start", "sayPhrase");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_CharacterSay = Class.create(InterventionEngineState,
+{
+    initialize: function($super, memory, events, resBox, placeholder)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.placeholder = placeholder; //box containing phrase - if >1 phrases, only first phrase will be spoken
+        self.R_charSpeaking = resBox.required[resBox.names.R_CHARSPEAKING];
+        self.P_charText = resBox.provided[resBox.names.P_CHARTEXT];
+        self.P_subs = resBox.provided[resBox.names.P_QA];
+        self.talked = false; //flag to only say the phrase once
+        self.waitingToSpeak = false; //flag to indicate that the character should start speaking soon (when audio gets loaded)
+
+    },
+    execute: function()
+    {
+        var self = this;
+        self.P_subs.container.questionId = -1;
+        self.P_subs.container.question = self.placeholder.get(0);
+        self.P_subs.container.timestamp = Date.now();
+        
+        if (!self.talked)
+        {
+            if (self.placeholder.size() == 0)
+            {
+                console.log("ERROR: State_CharacterSay empty placeholder !");
+            }
+            else
+            {
+                self.P_charText.container.text = self.placeholder.get(0);
+                    self.P_charText.container.timestamp = Date.now();
+            }
+            self.talked = true;
+            self.waitingToSpeak = true;
+        }
+        else
+        {
+            if (self.R_charSpeaking.container.speaking)
+            {
+                self.waitingToSpeak = false; //the character actually began to speak
+            }
+            
+            //if wait time is over, and she's no longer speaking
+            if (!self.waitingToSpeak && !self.R_charSpeaking.container.speaking)
+            {
+                return true; //exit state
+            }
+        }
+        
+        return false; //continue to iterate
+    },
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        self.talked = false;
+        self.waitingToSpeak = false;
+    }
+});
+
+Form = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox, formID)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.elementIDs = [];
+        self.currentElemID = [""];
+        
+        var Element = Parse.Object.extend('Element');
+        var Form = Parse.Object.extend('Form');
+        
+        var query = new Parse.Query(Element);
+        
+        query.equalTo('form', new Form({ id: formID }));
+        query.ascending('order');
+        query.select('objectId');
+        
+        query.find({
+            success: function(docs) {
+                //console.log(docs);
+                docs.forEach(function(doc) {
+                    self.elementIDs.push(doc.id)
+                });
+            },
+            error: function(err) {}
+        });
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("ExecFirst", new ExecMongoElement(memory, events, resBox, self.currentElemID, false));
+        self.addState("ExecRest", new ExecMongoElement(memory, events, resBox, self.currentElemID, true));
+        self.addTransition("start", "ExecFirst", new ConditionGuard(function(m){return self.elementIDs.length != 0;}, function(m){self.currentElemID[0]=self.elementIDs[self.index];}));
+        self.addTransition("ExecFirst", "ExecRest", new ConditionGuard(function(m){return (self.index!=self.elementIDs.length-1);}, function(m){self.index++; self.currentElemID[0]=self.elementIDs[self.index];}));
+        self.addTransition("ExecRest", "ExecFirst", new ConditionGuard(function(m){return (self.index==1 && m["goBackOneQuestion"]);}, function(m){console.log("Test");self.index--; self.currentElemID[0]=self.elementIDs[self.index];}));
+        self.addTransition("ExecRest", "ExecRest", new ConditionGuard(function(m){return (self.index>1 && m["goBackOneQuestion"]);}, function(m){console.log("BACKWARDS");console.log("self.index---------");console.log(self.index);self.index--; self.currentElemID[0]=self.elementIDs[self.index];}));
+        self.addTransition("ExecRest", "ExecRest", new ConditionGuard(function(m){return (self.index<self.elementIDs.length-1 && !m["goBackOneQuestion"]);}, function(m){console.log("FORWARD");console.log(m["goBackOneQuestion"]);self.index++; self.currentElemID[0]=self.elementIDs[self.index];}));
+        self.addTransition("ExecRest", "end", new ConditionGuard(function(m){return (self.index==self.elementIDs.length-1 && !m["goBackOneQuestion"]);}));
+        self.addTransition("ExecFirst", "end", new ConditionGuard(function(m){return (self.index==self.elementIDs.length-1);}));
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        self.index = 0;
+    }
+});
+
+DCU_CompleteIntervention_2017 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("MicOff", new State_TurnOffMicrophone(memory, events, resBox));
+        self.addState("Tutorial", new Procedure_Tutorial(memory, events, resBox));
+        self.addState("Audit_deprecated", new Form(memory, events, resBox, "FS0pvWxhQI"));
+        self.addState("exit branch 2", new State_Empty(memory, events, resBox));
+        self.addState("OfferProgram", new ProgramOffer(memory, events, resBox));
+        self.addState("exit branch 3", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("RegisterUser", new UserRegistration(memory, events, resBox));
+        self.addState("InterventionModule", new InterventionModule(memory, events, resBox));
+        self.addState("Audit_with_Res", new Audit_2018(memory, events, resBox));
+        self.addState("AuditFeedback", new DCU_AuditFeedback(memory, events, resBox));
+        self.addState("Greeting_2018_NewUsers", new Greeting_2018(memory, events, resBox));
+        self.addState("branch_NewVsReturningUsers", new Branch_NewVsReturningUser(memory, events, resBox));
+        self.addState("Test_RangeSliderElement", new Form(memory, events, resBox, "ZQjPGT0m7t"));
+        self.addState("Greeting_2018_ReturningUsers", new ReturningUserWelcome_2018(memory, events, resBox));
+        self.addState("ExitStatement", new ExitStatement_2018(memory, events, resBox));
+        self.addState("GreetNewlyRegisteredUser", new GreetNewlyRegisteredUser_2018(memory, events, resBox));
+        self.addState("Audit_Q1_With Res", new Audit_Q1_WithRes(memory, events, resBox));
+        self.addState("exit branch 1", new State_Empty(memory, events, resBox));
+        self.addTransition("start", "MicOff");
+        self.addTransition("OfferProgram", "exit branch 3", new ConditionGuard(function(m){return m["DCUOfferProgramDecision"] == 1;}));
+        self.addTransition("AuditFeedback", "exit branch 2", new ConditionGuard(function(m){return m["DCUFeedbackUserDecision"] == 1;}));
+        self.addTransition("AuditFeedback", "OfferProgram", new ConditionGuard(function(m){return m["DCUFeedbackUserDecision"] == 0;}));
+        self.addTransition("Greeting_2018_NewUsers", "Tutorial");
+        self.addTransition("branch_NewVsReturningUsers", "Greeting_2018_NewUsers", new ConditionGuard(function(m){return m["bypassAudit"] == 1;}));
+        self.addTransition("Greeting_2018_ReturningUsers", "InterventionModule");
+        self.addTransition("branch_NewVsReturningUsers", "Greeting_2018_ReturningUsers", new ConditionGuard(function(m){return m["bypassAudit"] == 2;}));
+        self.addTransition("exit branch 2", "ExitStatement");
+        self.addTransition("exit branch 3", "ExitStatement");
+        self.addTransition("InterventionModule", "ExitStatement");
+        self.addTransition("ExitStatement", "end");
+        self.addTransition("RegisterUser", "GreetNewlyRegisteredUser");
+        self.addTransition("MicOff", "branch_NewVsReturningUsers");
+        self.addTransition("Audit_with_Res", "AuditFeedback");
+        self.addTransition("Tutorial", "Audit_Q1_With Res");
+        self.addTransition("Audit_Q1_With Res", "Audit_with_Res", new ConditionGuard(function(m){return (m["AUDITq1Drinking"] == 1 || m["AUDITq1Drinking"] == 2 || m["AUDITq1Drinking"] == 3 || m["AUDITq1Drinking"] == 4);}));
+        self.addTransition("Audit_Q1_With Res", "exit branch 1", new ConditionGuard(function(m){return m["AUDITq1Drinking"] == 0;}));
+        self.addTransition("exit branch 1", "ExitStatement");
+        self.addTransition("OfferProgram", "InterventionModule", new ConditionGuard(function(m){return m["DCUOfferProgramDecision"] == 0;}));
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+FB_GTNSGT_2017 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("htmlContent", new ExecMongoElement(memory, events, resBox, ["OH7AtwVBQc"], false));
+        self.addState("prompt", new ExecMongoElement(memory, events, resBox, ["M4TYoaRZde"], false));
+        self.addState("fullScreen", new ExecMongoElement(memory, events, resBox, ["rO2N1LvAbF"], false));
+        self.addState("personalizedFeedback", new SayPhrase(memory, events, resBox, ));
+        self.addTransition("start", "htmlContent");
+        self.addTransition("htmlContent", "prompt");
+        self.addTransition("personalizedFeedback", "prompt");
+        self.addTransition("prompt", "fullScreen");
+        self.addTransition("fullScreen", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_ProcessUserAnswer = Class.create(InterventionEngineState,
+{
+    initialize: function($super, memory, events, resBox, jsonRef)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.memory = memory;
+        self.R_userChoice = resBox.required[resBox.names.R_USERCHOICE];
+        self.P_questionInfo = resBox.provided[resBox.names.P_CRTQUESTIONINFO];
+        self.P_answerInfo = resBox.provided[resBox.names.P_CRTANSWERINFO];
+        self.elementJSONref = jsonRef;
+        self.timeEnteredState = Date.now();
+
+    },
+    execute: function()
+    {
+        var self = this;
+        if (self.R_userChoice.container.timestamp > self.timeEnteredState)
+        {
+            self.memory["currentAnswerRiskScore"] = 0; //TODO get from DB history
+            self.memory["lastUserAnswerId"] = self.R_userChoice.container.choice;
+        
+            //transmit information about current question and answer
+            //TODO why is questionInfo used for !?!?
+            self.P_questionInfo.container.id = self.elementJSONref[0]._id;
+            self.P_questionInfo.container.nrOfAnswers = self.elementJSONref[0].content.length;
+            self.P_questionInfo.container.timestamp = Date.now();
+            self.P_answerInfo.container.id = self.memory["lastUserAnswerId"];
+            self.P_answerInfo.container.riskScore = self.memory["currentAnswerRiskScore"];
+            self.P_answerInfo.container.timestamp = Date.now();
+            return true;
+        }
+        else
+        {
+            return false; //keep waiting for user to answer
+        }
+    },
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        self.timeEnteredState = Date.now();
+        self.memory["lastUserAnswerId"] = -1;
+    }
+});
+
+Demo_DynamicSpeech = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.angularScope = null;
+        var getAngularElement = function() {	
+        
+            var appElement = document.querySelector('[id=elementPanel]');
+            var scope = angular.element(appElement).scope();
+        
+            if(scope === undefined){
+        
+                setTimeout(function(){
+                    getAngularElement();
+                }, 10);
+                return;
+            }
+            self.angularScope = scope;         
+        }
+        getAngularElement();
+        
+        let counselorName = self.angularScope.$parent.$parent.$parent.$root.$root.selectedCounselor.name;
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("intro", new ExecMongoElement(memory, events, resBox, ["NDXFvUTRpY"], false));
+        self.addState("dynamic speech", new SayPhrase(memory, events, resBox, new Placeholder("Hello, my name is " + counselorName +".  It is a pleasure to meet you!")));
+        self.addTransition("start", "intro");
+        self.addTransition("intro", "dynamic speech");
+        self.addTransition("dynamic speech", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_DrinkingConsequences = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("1: Quality of Drinking", new ExecMongoElement(memory, events, resBox, ["5804e430867b711ab07e605b"], false));
+        self.addState("2 Feedback Info", new ExecMongoElement(memory, events, resBox, ["5804e1f2867b711ab07e6059"], false));
+        self.addState("3- ChooseNext", new ExecMongoElement(memory, events, resBox, ["5804f072867b711ab07e605d"], false));
+        self.addState("5- ChooseNext", new ExecMongoElement(memory, events, resBox, ["5804fc77867b711ab07e605f"], false));
+        self.addState("4- BDP", new ExecMongoElement(memory, events, resBox, ["5804fc77867b711ab07e605e"], false));
+        self.addState("6- Part 1 DrInC", new ExecMongoElement(memory, events, resBox, ["580fb134867b711ab07e6062"], false));
+        self.addState("12- SOCRATES", new ExecMongoElement(memory, events, resBox, ["580fb386867b711ab07e6066"], false));
+        self.addState("11- ChooseNext", new ExecMongoElement(memory, events, resBox, ["580fb260867b711ab07e6065"], false));
+        self.addState("10- SADQ-C", new ExecMongoElement(memory, events, resBox, ["580fb260867b711ab07e6064"], false));
+        self.addState("9- ChooseNext", new ExecMongoElement(memory, events, resBox, ["580fb193867b711ab07e6063"], false));
+        self.addState("8: DrInC Part 2", new ExecMongoElement(memory, events, resBox, ["5818ce1d0eb74016d46e05fe"], false));
+        self.addState("7: Go to Part 2 of DrinC", new ExecMongoElement(memory, events, resBox, ["5818ce1d0eb74016d46e05fd"], false));
+        self.addState("13- ChooseNext", new ExecMongoElement(memory, events, resBox, ["580fb386867b711ab07e6067"], false));
+        self.addTransition("1: Quality of Drinking", "2 Feedback Info");
+        self.addTransition("2 Feedback Info", "3- ChooseNext");
+        self.addTransition("3- ChooseNext", "4- BDP", new ConditionGuard(function(m){return m["lastUserAnswerId"]==0;}, function(m){m["feedbackChoice"]=0;}));
+        self.addTransition("4- BDP", "5- ChooseNext");
+        self.addTransition("10- SADQ-C", "11- ChooseNext");
+        self.addTransition("11- ChooseNext", "12- SOCRATES", new ConditionGuard(function(m){return m["lastUserAnswerId"]==3;}, function(m){m["feedbackChoice"]=3;}));
+        self.addTransition("8: DrInC Part 2", "9- ChooseNext");
+        self.addTransition("9- ChooseNext", "10- SADQ-C", new ConditionGuard(function(m){return m["lastUserAnswerId"]==2;}, function(m){m["feedbackChoice"]=2;}));
+        self.addTransition("12- SOCRATES", "13- ChooseNext");
+        self.addTransition("7: Go to Part 2 of DrinC", "8: DrInC Part 2");
+        self.addTransition("6- Part 1 DrInC", "7: Go to Part 2 of DrinC");
+        self.addTransition("start", "1: Quality of Drinking");
+        self.addTransition("5- ChooseNext", "6- Part 1 DrInC", new ConditionGuard(function(m){return m["lastUserAnswerId"]==1;}, function(m){m["feedbackChoice"]=1;}));
+        self.addTransition("3- ChooseNext", "6- Part 1 DrInC", new ConditionGuard(function(m){return m["lastUserAnswerId"]==1;}, function(m){m["feedbackChoice"]=1;}));
+        self.addTransition("3- ChooseNext", "10- SADQ-C", new ConditionGuard(function(m){return m["lastUserAnswerId"]==2;}, function(m){m["feedbackChoice"]=2;}));
+        self.addTransition("3- ChooseNext", "12- SOCRATES", new ConditionGuard(function(m){return m["lastUserAnswerId"]==3;}, function(m){m["feedbackChoice"]=3;}));
+        self.addTransition("3- ChooseNext", "end", new ConditionGuard(function(m){return m["lastUserAnswerId"]==4;}, function(m){m["feedbackChoice"]=4;}));
+        self.addTransition("5- ChooseNext", "10- SADQ-C", new ConditionGuard(function(m){return m["lastUserAnswerId"]==2;}, function(m){m["feedbackChoice"]=2;}));
+        self.addTransition("5- ChooseNext", "1: Quality of Drinking", new ConditionGuard(function(m){return m["lastUserAnswerId"]==0;}, function(m){m["feedbackChoice"]=0;}));
+        self.addTransition("5- ChooseNext", "12- SOCRATES", new ConditionGuard(function(m){return m["lastUserAnswerId"]==3;}, function(m){m["feedbackChoice"]=3;}));
+        self.addTransition("5- ChooseNext", "end", new ConditionGuard(function(m){return m["lastUserAnswerId"]==4;}, function(m){m["feedbackChoice"]=4;}));
+        self.addTransition("9- ChooseNext", "1: Quality of Drinking", new ConditionGuard(function(m){return m["lastUserAnswerId"]==0;}, function(m){m["feedbackChoice"]=0;}));
+        self.addTransition("9- ChooseNext", "4- BDP", new ConditionGuard(function(m){return m["lastUserAnswerId"]==1;}, function(m){m["feedbackChoice"]=1;}));
+        self.addTransition("9- ChooseNext", "12- SOCRATES", new ConditionGuard(function(m){return m["lastUserAnswerId"]==3;}, function(m){m["feedbackChoice"]=3;}));
+        self.addTransition("9- ChooseNext", "end", new ConditionGuard(function(m){return m["lastUserAnswerId"]==4;}, function(m){m["feedbackChoice"]=4;}));
+        self.addTransition("11- ChooseNext", "1: Quality of Drinking", new ConditionGuard(function(m){return m["lastUserAnswerId"]==0;}, function(m){m["feedbackChoice"]=1;}));
+        self.addTransition("11- ChooseNext", "4- BDP", new ConditionGuard(function(m){return m["lastUserAnswerId"]==1;}, function(m){m["feedbackChoice"]=1;}));
+        self.addTransition("11- ChooseNext", "6- Part 1 DrInC", new ConditionGuard(function(m){return m["lastUserAnswerId"]==2;}, function(m){m["feedbackChoice"]=2;}));
+        self.addTransition("11- ChooseNext", "end", new ConditionGuard(function(m){return m["lastUserAnswerId"]==4;}, function(m){m["feedbackChoice"]=4;}));
+        self.addTransition("13- ChooseNext", "1: Quality of Drinking", new ConditionGuard(function(m){return m["lastUserAnswerId"]==0;}, function(m){m["feedbackChoice"]=0;}));
+        self.addTransition("13- ChooseNext", "4- BDP", new ConditionGuard(function(m){return m["lastUserAnswerId"]==1;}, function(m){m["feedbackChoice"]=1;}));
+        self.addTransition("13- ChooseNext", "6- Part 1 DrInC", new ConditionGuard(function(m){return m["lastUserAnswerId"]==2;}, function(m){m["feedbackChoice"]=2;}));
+        self.addTransition("13- ChooseNext", "10- SADQ-C", new ConditionGuard(function(m){return m["lastUserAnswerId"]==3;}, function(m){m["feedbackChoice"]=3;}));
+        self.addTransition("13- ChooseNext", "end", new ConditionGuard(function(m){return m["lastUserAnswerId"]==4;}, function(m){m["feedbackChoice"]=4;}));
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+DepressedMood_2018 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("01", new ExecMongoElement(memory, events, resBox, ["Xa53yrNyGT"], false));
+        self.addState("q1", new ExecMongoElement(memory, events, resBox, ["wEl6CRXHap"], false));
+        self.addState("q2", new ExecMongoElement(memory, events, resBox, ["7C7lYsNVrG"], true));
+        self.addState("q3", new ExecMongoElement(memory, events, resBox, ["yQhfDjY1Hv"], true));
+        self.addState("q4", new ExecMongoElement(memory, events, resBox, ["ESzTFSxNqP"], true));
+        self.addState("q5", new ExecMongoElement(memory, events, resBox, ["VNpgWGgR4M"], true));
+        self.addState("q6", new ExecMongoElement(memory, events, resBox, ["skEnfaheGA"], true));
+        self.addState("q7", new ExecMongoElement(memory, events, resBox, ["u0M8THtHeu"], true));
+        self.addState("q8", new ExecMongoElement(memory, events, resBox, ["DO85GeUxhE"], true));
+        self.addState("q9", new ExecMongoElement(memory, events, resBox, ["3z52fzxiYn"], true));
+        self.addState("q10", new ExecMongoElement(memory, events, resBox, ["ZEBeQFKqD6"], true));
+        self.addState("q11", new ExecMongoElement(memory, events, resBox, ["HsJFBrsREs"], true));
+        self.addState("q12", new ExecMongoElement(memory, events, resBox, ["AvCFAxuxUF"], true));
+        self.addState("q13", new ExecMongoElement(memory, events, resBox, ["vRMntIjuE2"], true));
+        self.addState("q14", new ExecMongoElement(memory, events, resBox, ["bYjn7kpxgy"], true));
+        self.addState("q15", new ExecMongoElement(memory, events, resBox, ["NB7AzeSBRH"], true));
+        self.addState("q16", new ExecMongoElement(memory, events, resBox, ["rSlFWovcfk"], true));
+        self.addState("q17", new ExecMongoElement(memory, events, resBox, ["cKiSS5MKkf"], true));
+        self.addState("q18", new ExecMongoElement(memory, events, resBox, ["Muxcv4Ua10"], true));
+        self.addState("q19", new ExecMongoElement(memory, events, resBox, ["6cBmIYiTKC"], true));
+        self.addState("r_q1", new State_ResponseDecision_4Choices(memory, events, resBox));
+        self.addState("r_q6", new State_ResponseDecision_4Choices(memory, events, resBox));
+        self.addState("r_12", new State_ResponseDecision_4Choices(memory, events, resBox));
+        self.addState("r_q17", new State_ResponseDecision_4Choices(memory, events, resBox));
+        self.addState("q20", new ExecMongoElement(memory, events, resBox, ["tWHgD3sg4A"], true));
+        self.addState("r_q4_Maya", new State_ResponseDecision_Maya_4Choices(memory, events, resBox));
+        self.addState("r_q10_Maya", new State_ResponseDecision_Maya_4Choices(memory, events, resBox));
+        self.addState("r_q15_Maya", new State_ResponseDecision_Maya_4Choices(memory, events, resBox));
+        self.addState("r_q20_Maya", new State_ResponseDecision_Maya_4Choices(memory, events, resBox));
+        self.addState("thankYouStatement", new ExecMongoElement(memory, events, resBox, ["tWYc4RMDja"], true));
+        self.addTransition("start", "01");
+        self.addTransition("01", "q1");
+        self.addTransition("q1", "r_q1");
+        self.addTransition("r_q1", "q2");
+        self.addTransition("q2", "q3");
+        self.addTransition("q3", "q4");
+        self.addTransition("q5", "q6");
+        self.addTransition("q6", "r_q6");
+        self.addTransition("r_q6", "q7");
+        self.addTransition("q7", "q8");
+        self.addTransition("q8", "q9");
+        self.addTransition("q9", "q10");
+        self.addTransition("q11", "q12");
+        self.addTransition("q12", "r_12");
+        self.addTransition("r_12", "q13");
+        self.addTransition("q13", "q14");
+        self.addTransition("q14", "q15");
+        self.addTransition("q16", "q17");
+        self.addTransition("q17", "r_q17");
+        self.addTransition("r_q17", "q18");
+        self.addTransition("q18", "q19");
+        self.addTransition("q19", "q20");
+        self.addTransition("q4", "r_q4_Maya");
+        self.addTransition("r_q4_Maya", "q5");
+        self.addTransition("q10", "r_q10_Maya");
+        self.addTransition("r_q10_Maya", "q11");
+        self.addTransition("q15", "r_q15_Maya");
+        self.addTransition("r_q15_Maya", "q16");
+        self.addTransition("q20", "r_q20_Maya");
+        self.addTransition("r_q20_Maya", "thankYouStatement");
+        self.addTransition("thankYouStatement", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+DCU_CompleteIntervention = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("Tutorial", new Procedure_Tutorial(memory, events, resBox));
+        self.addState("Provide Feedback", new DCU_AuditFeedback(memory, events, resBox));
+        self.addState("TODO end intervention", new SayPhrase(memory, events, resBox, new Placeholder("end intervention")));
+        self.addState("Offer Program", new DCU_OfferProgram(memory, events, resBox));
+        self.addState("Register User", new DCU_RegisterUser(memory, events, resBox));
+        self.addState("Decision Balance Exercise", new DCU_DecisionBalanceExercise(memory, events, resBox));
+        self.addState("exit branch 1", new State_Empty(memory, events, resBox));
+        self.addState("exit branch 2", new State_Empty(memory, events, resBox));
+        self.addState("Feedback Module", new DCU_FeedbackModule(memory, events, resBox));
+        self.addState("MicOff", new State_TurnOffMicrophone(memory, events, resBox));
+        self.addState("Audit", new Form(memory, events, resBox, "eG6W0AAAHY"));
+        self.addState("DrInc", new Form(memory, events, resBox, "Jl7sIr2MvI"));
+        self.addState("BDP", new Form(memory, events, resBox, "ICwB0uKnDZ"));
+        self.addState("SOCRATES", new Form(memory, events, resBox, "JawRpyEENc"));
+        self.addState("SADQC", new SADQC(memory, events, resBox));
+        self.addState("Greetings", new Form(memory, events, resBox, "HnbYo2F8uE"));
+        self.addState("Behavior Change Planner", new DCU_BehaviorChangePlanner(memory, events, resBox));
+        self.addState("Readiness Ruler", new DCU_ReadinessRuler(memory, events, resBox));
+        self.addState("Gracefully End Interaction", new DCU_GracefullyEndInteraction(memory, events, resBox));
+        self.addTransition("Provide Feedback", "Offer Program", new ConditionGuard(function(m){return m["DCUFeedbackUserDecision"] == 0;}));
+        self.addTransition("Offer Program", "Register User", new ConditionGuard(function(m){return m["DCUOfferProgramDecision"] == 0;}));
+        self.addTransition("Register User", "Decision Balance Exercise");
+        self.addTransition("TODO end intervention", "end");
+        self.addTransition("Provide Feedback", "exit branch 1", new ConditionGuard(function(m){return m["DCUFeedbackUserDecision"] == 1;}));
+        self.addTransition("Offer Program", "exit branch 2", new ConditionGuard(function(m){return m["DCUOfferProgramDecision"] == 1;}));
+        self.addTransition("exit branch 1", "TODO end intervention");
+        self.addTransition("exit branch 2", "TODO end intervention");
+        self.addTransition("Tutorial", "Audit");
+        self.addTransition("Audit", "Provide Feedback");
+        self.addTransition("Decision Balance Exercise", "DrInc", new ConditionGuard(function(m){return (m["HomeChoice"]==1);}));
+        self.addTransition("DrInc", "Feedback Module");
+        self.addTransition("Decision Balance Exercise", "BDP", new ConditionGuard(function(m){return (m["HomeChoice"]==0);}));
+        self.addTransition("BDP", "Feedback Module");
+        self.addTransition("Decision Balance Exercise", "SADQC", new ConditionGuard(function(m){return (m["HomeChoice"]==2);}));
+        self.addTransition("SADQC", "Feedback Module");
+        self.addTransition("Decision Balance Exercise", "SOCRATES", new ConditionGuard(function(m){return (m["HomeChoice"]==3);}));
+        self.addTransition("SOCRATES", "Feedback Module");
+        self.addTransition("start", "MicOff");
+        self.addTransition("Feedback Module", "Readiness Ruler");
+        self.addTransition("Readiness Ruler", "Behavior Change Planner");
+        self.addTransition("Behavior Change Planner", "Gracefully End Interaction");
+        self.addTransition("Gracefully End Interaction", "end");
+        self.addTransition("Greetings", "Tutorial");
+        self.addTransition("MicOff", "Greetings");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        self.memory["currentFormRiskScore"] = 0;
+    }
+});
+
+DCU_ReadinessRuler = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("Drinking Consequences", new Form(memory, events, resBox, "2Q30gTm10v"));
+        self.addState("Consider Your Options", new Form(memory, events, resBox, "JDP41AOqWv"));
+        self.addState("Your Current Thinking", new Form(memory, events, resBox, "GZvwUIWIJR"));
+        self.addState("Congratulations", new Form(memory, events, resBox, "9o3CFyJTU7"));
+        self.addTransition("start", "Drinking Consequences");
+        self.addTransition("Consider Your Options", "Your Current Thinking");
+        self.addTransition("Your Current Thinking", "end");
+        self.addTransition("Drinking Consequences", "Congratulations");
+        self.addTransition("Congratulations", "Consider Your Options");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_ShowElement = Class.create(InterventionEngineState,
+{
+    initialize: function($super, memory, events, resBox, jsonRef)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.elementJSONref = jsonRef;
+        self.P_elemJSON = resBox.provided[resBox.names.P_ELEMENTJSON];
+
+    },
+    execute: function()
+    {
+        var self = this;
+        self.P_elemJSON.container.json = self.elementJSONref[0];
+        self.P_elemJSON.container.timestamp = Date.now();
+        
+        return true;
+    },
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+TestInput = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("QA", new ExecMongoElement(memory, events, resBox, ["57b4a0b6ab07691dd08adb6e"], false));
+        self.addState("Checkbox", new ExecMongoElement(memory, events, resBox, ["57b4a0b6ab07691dd08adb6f"], false));
+        self.addState("Textarea", new ExecMongoElement(memory, events, resBox, ["57b4a0b6ab07691dd08adb70"], false));
+        self.addState("Feedback", new ExecMongoElement(memory, events, resBox, ["57b4a0b6ab07691dd08adb71"], false));
+        self.addState("FeedbackList", new ExecMongoElement(memory, events, resBox, ["57b4a0b6ab07691dd08adb72"], false));
+        self.addTransition("Textarea", "Feedback");
+        self.addTransition("Feedback", "FeedbackList");
+        self.addTransition("FeedbackList", "end");
+        self.addTransition("start", "QA");
+        self.addTransition("QA", "Checkbox");
+        self.addTransition("Checkbox", "Textarea");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+Audit_WithResponses = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("q1", new ExecMongoElement(memory, events, resBox, ["480OIkUfRe"], false));
+        self.addState("q2", new ExecMongoElement(memory, events, resBox, ["TRbkGxXZij"], false));
+        self.addState("q3", new ExecMongoElement(memory, events, resBox, ["OZ1OGVDdK4"], false));
+        self.addState("responseConcern", new ExecMongoElement(memory, events, resBox, ["E6UjN8fAGu"], false));
+        self.addState("responseWidenSmile", new ExecMongoElement(memory, events, resBox, ["xHBWFT9gU0"], false));
+        self.addTransition("start", "q1");
+        self.addTransition("q1", "q2", new ConditionGuard(function(m){return ((m["lastUserAnswerId"] < 2) || (m["lastUserAnswerId"] > 2));}));
+        self.addTransition("q2", "q3", new ConditionGuard(function(m){return m["lastUserAnswerId"] < 2;}));
+        self.addTransition("q1", "responseWidenSmile", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 2;}));
+        self.addTransition("responseWidenSmile", "q2");
+        self.addTransition("q2", "responseConcern", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 2;}));
+        self.addTransition("responseConcern", "q3");
+        self.addTransition("q3", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+FB_Risk_2017 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("fullScreen", new ExecMongoElement(memory, events, resBox, ["jqCg1gM2dy"], false));
+        self.addState("prompt", new ExecMongoElement(memory, events, resBox, ["FPACjZhiCF"], false));
+        self.addState("htmlContent", new ExecMongoElement(memory, events, resBox, ["AcyDIZYWiv"], false));
+        self.addState("personalizedFeedback", new SayPhrase(memory, events, resBox, ));
+        self.addTransition("start", "htmlContent");
+        self.addTransition("htmlContent", "prompt");
+        self.addTransition("personalizedFeedback", "prompt");
+        self.addTransition("prompt", "fullScreen");
+        self.addTransition("fullScreen", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+DCU_RegisterUser = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("TODO Register User", new SayPhrase(memory, events, resBox, new Placeholder("TODO register user")));
+        self.addState("register feedback", new ExecMongoElement(memory, events, resBox, ["578d240d0e2d6170a983ff6b"], false));
+        self.addState("prompt user", new ExecMongoElement(memory, events, resBox, ["578d240d0e2d6170a983ff6c"], false));
+        self.addState("remind user", new ExecMongoElement(memory, events, resBox, ["578d240d0e2d6170a983ff6d"], false));
+        self.addTransition("start", "register feedback");
+        self.addTransition("register feedback", "prompt user");
+        self.addTransition("prompt user", "remind user", new ConditionGuard(function(m){return (m["lastUserAnswerId"]==2);}));
+        self.addTransition("remind user", "end");
+        self.addTransition("prompt user", "TODO Register User", new ConditionGuard(function(m){return (m["lastUserAnswerId"]==1);}));
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_WaitToVerifyUserAnswer = Class.create(InterventionEngineState,
+{
+    initialize: function($super, memory, events, resBox, timeToWait, cancelCommands)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.timeEnteredState = Date.now();
+        self.lastCheckedInterimText = Date.now();
+        self.timeToWait = timeToWait;
+        self.cancelCommands = cancelCommands;
+        self.R_interimUserText = resBox.required[resBox.names.R_INTERIMUSERTEXT];
+        self.memory = memory;
+
+    },
+    execute: function()
+    {
+        var self = this;
+        if (Date.now() - self.timeEnteredState > self.timeToWait)
+        {
+            self.memory["answerVerified"] = true;
+            return true;
+        }
+        else
+        {
+            //check if user uttered any commands to cancel the choice
+            //cancelCommands
+            //self.R_interimUserText
+            if (self.R_interimUserText.container.timestamp > self.lastCheckedInterimText)
+            {
+                self.lastCheckedInterimText = self.R_interimUserText.container.timestamp;
+                
+                var interimWords = self.R_interimUserText.container.text.toLowerCase().split(" ");
+                for (var i=0; i<interimWords.length; ++i)
+                {
+                    for (var j=0; j<self.cancelCommands.length; ++j)
+                    {
+                        if (interimWords[i] === self.cancelCommands[j])
+                        {
+                            self.memory["answerVerified"] = false;
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+    },
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        self.lastCheckedInterimText = Date.now();
+        self.timeEnteredState = Date.now();
+        self.memory["answerVerified"] = false;
+    }
+});
+
+ProgramOffer = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("prompt", new ExecMongoElement(memory, events, resBox, ["CE4Ge7Ef5C"], false));
+        self.addTransition("start", "prompt");
+        self.addTransition("prompt", "end", new ConditionGuard(function(m){return (m["lastUserAnswerId"] == 0);}, function(m){m["DCUOfferProgramDecision"] = 0;}));
+        self.addTransition("prompt", "end", new ConditionGuard(function(m){return (m["lastUserAnswerId"] == 1);}, function(m){m["DCUOfferProgramDecision"] = 1;}));
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+ChancesOfSuccess_2018 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("O1", new ExecMongoElement(memory, events, resBox, ["vmPfOf9weg"], false));
+        self.addState("O2", new ExecMongoElement(memory, events, resBox, ["ADMexrDcYJ"], false));
+        self.addState("O3", new ExecMongoElement(memory, events, resBox, ["Hlb51RLafH"], false));
+        self.addState("O4", new ExecMongoElement(memory, events, resBox, ["Z9wvmvUszw"], false));
+        self.addState("q1", new ExecMongoElement(memory, events, resBox, ["P8ZORJCP2t"], false));
+        self.addState("q2", new ExecMongoElement(memory, events, resBox, ["anKnOz2zw9"], true));
+        self.addState("q3", new ExecMongoElement(memory, events, resBox, ["NebDyUe5qg"], true));
+        self.addState("q4", new ExecMongoElement(memory, events, resBox, ["EbJlYYgmON"], true));
+        self.addState("q5", new ExecMongoElement(memory, events, resBox, ["wnj3m1I4fr"], true));
+        self.addState("q6", new ExecMongoElement(memory, events, resBox, ["da57qkCJJx"], true));
+        self.addState("q7", new ExecMongoElement(memory, events, resBox, ["lTBnnPVswQ"], true));
+        self.addState("q8", new ExecMongoElement(memory, events, resBox, ["XPNbG5yWKK"], true));
+        self.addState("q9", new ExecMongoElement(memory, events, resBox, ["FSxb56512e"], true));
+        self.addState("q10", new ExecMongoElement(memory, events, resBox, ["tZqTfnFqFk"], true));
+        self.addState("q11", new ExecMongoElement(memory, events, resBox, ["G4RdTw8AlV"], true));
+        self.addState("q12", new ExecMongoElement(memory, events, resBox, ["lkq0iDzd7Z"], true));
+        self.addState("q13", new ExecMongoElement(memory, events, resBox, ["Ww5xSMi2CC"], true));
+        self.addState("q14", new ExecMongoElement(memory, events, resBox, ["wsCQRHjYkg"], true));
+        self.addState("q15", new ExecMongoElement(memory, events, resBox, ["LW2xfnSTxl"], true));
+        self.addState("q16", new ExecMongoElement(memory, events, resBox, ["3GuR72PJfe"], true));
+        self.addState("q17", new ExecMongoElement(memory, events, resBox, ["P3h1vN21qh"], true));
+        self.addState("q18", new ExecMongoElement(memory, events, resBox, ["2M78gEZsmt"], true));
+        self.addState("q19", new ExecMongoElement(memory, events, resBox, ["sFMai1HlQC"], true));
+        self.addState("q20", new ExecMongoElement(memory, events, resBox, ["DffMpv7KJi"], true));
+        self.addState("q21", new ExecMongoElement(memory, events, resBox, ["yQyMx17bXy"], true));
+        self.addState("q22", new ExecMongoElement(memory, events, resBox, ["GivFm6vAUY"], true));
+        self.addState("q23", new ExecMongoElement(memory, events, resBox, ["AAtW0GCLKn"], true));
+        self.addState("q24", new ExecMongoElement(memory, events, resBox, ["e1yYpKX6jG"], true));
+        self.addState("r_q2", new State_Responses_2choices(memory, events, resBox));
+        self.addState("r_q22", new State_Responses_2choices(memory, events, resBox));
+        self.addState("r_q20", new State_Responses_2choices(memory, events, resBox));
+        self.addState("r_q18", new State_Responses_2choices(memory, events, resBox));
+        self.addState("r_q14", new State_Responses_2choices(memory, events, resBox));
+        self.addState("r_q12", new State_Responses_2choices(memory, events, resBox));
+        self.addState("r_q11", new State_Responses_2choices(memory, events, resBox));
+        self.addState("r_q7", new State_Responses_2choices(memory, events, resBox));
+        self.addState("thankYouStatement", new ExecMongoElement(memory, events, resBox, ["WxIzeOKQxa"], true));
+        self.addTransition("start", "O1");
+        self.addTransition("O1", "O2");
+        self.addTransition("O2", "O3");
+        self.addTransition("O3", "O4");
+        self.addTransition("O4", "q1");
+        self.addTransition("q1", "q2");
+        self.addTransition("q2", "r_q2");
+        self.addTransition("r_q2", "q3");
+        self.addTransition("q3", "q4");
+        self.addTransition("q4", "q5");
+        self.addTransition("q5", "q6");
+        self.addTransition("q6", "q7");
+        self.addTransition("q7", "r_q7");
+        self.addTransition("r_q7", "q8");
+        self.addTransition("q8", "q9");
+        self.addTransition("q9", "q10");
+        self.addTransition("q10", "q11");
+        self.addTransition("q11", "r_q11");
+        self.addTransition("r_q11", "q12");
+        self.addTransition("q12", "r_q12");
+        self.addTransition("r_q12", "q13");
+        self.addTransition("q13", "q14");
+        self.addTransition("q14", "r_q14");
+        self.addTransition("r_q14", "q15");
+        self.addTransition("q15", "q16");
+        self.addTransition("q16", "q17");
+        self.addTransition("q17", "q18");
+        self.addTransition("q18", "r_q18");
+        self.addTransition("r_q18", "q19");
+        self.addTransition("q19", "q20");
+        self.addTransition("q20", "r_q20");
+        self.addTransition("r_q20", "q21");
+        self.addTransition("q21", "q22");
+        self.addTransition("q23", "q24");
+        self.addTransition("q22", "r_q22");
+        self.addTransition("r_q22", "q23");
+        self.addTransition("q24", "thankYouStatement");
+        self.addTransition("thankYouStatement", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+HowMuchOftenYouDrink = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("HowMuchOften_Menu", new Form(memory, events, resBox, "EH8SNRJNS0"));
+        self.addState("MyDrinkingFamilyHistory", new Form(memory, events, resBox, "1X46dxq8Il"));
+        self.addState("MyDrinking_Deprecated", new Form(memory, events, resBox, "fQikcFzbKI"));
+        self.addState("OtherDrugs_Deprecated", new Form(memory, events, resBox, "IJa6TTf4Gs"));
+        self.addState("MyDrinking_2018", new MyDrinking_2018(memory, events, resBox));
+        self.addState("OtherDrugs_2018", new OtherDrugs_2018(memory, events, resBox));
+        self.addState("myDrinking_v2_noRes", new Form(memory, events, resBox, "fQikcFzbKI"));
+        self.addState("OtherDrugs_v2_noRes", new Form(memory, events, resBox, "IJa6TTf4Gs"));
+        self.addTransition("HowMuchOften_Menu", "MyDrinkingFamilyHistory", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 0;}));
+        self.addTransition("MyDrinkingFamilyHistory", "HowMuchOften_Menu");
+        self.addTransition("HowMuchOften_Menu", "end", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 3;}));
+        self.addTransition("start", "HowMuchOften_Menu");
+        self.addTransition("HowMuchOften_Menu", "MyDrinking_2018", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 1;}));
+        self.addTransition("MyDrinking_2018", "HowMuchOften_Menu");
+        self.addTransition("HowMuchOften_Menu", "OtherDrugs_2018", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 2;}));
+        self.addTransition("OtherDrugs_2018", "HowMuchOften_Menu");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_BDP_201710 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("greeting", new ExecMongoElement(memory, events, resBox, ["yd0DXttwIp"], false));
+        self.addState("prompt", new ExecMongoElement(memory, events, resBox, ["sKtKvV0Jnk"], false));
+        self.addState("sectionA", new Form(memory, events, resBox, "7k5jO2qcPc"));
+        self.addState("sectionB", new Form(memory, events, resBox, "HRR0eKEB6T"));
+        self.addState("sectionC", new Form(memory, events, resBox, "2HGVWuKtWc"));
+        self.addTransition("start", "greeting");
+        self.addTransition("greeting", "prompt");
+        self.addTransition("prompt", "sectionA", new ConditionGuard(function(m){return m["lastUserAnswerId"]==0;}, function(m){m["feedbackChoice"]=0;}));
+        self.addTransition("sectionA", "prompt");
+        self.addTransition("prompt", "sectionB", new ConditionGuard(function(m){return m["lastUserAnswerId"]==1;}, function(m){m["feedbackChoice"]=1;}));
+        self.addTransition("sectionB", "prompt");
+        self.addTransition("prompt", "sectionC", new ConditionGuard(function(m){return m["lastUserAnswerId"]==2;}, function(m){m["feedbackChoice"]=2;}));
+        self.addTransition("sectionC", "prompt");
+        self.addTransition("prompt", "end", new ConditionGuard(function(m){return m["lastUserAnswerId"]==3;}, function(m){m["feedbackChoice"]=3;}));
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+ProcessUserAnswerWithMic = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox, question)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.question = question
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("Process", new State_ProcessUserAnswer(memory, events, resBox, self.question));
+        self.addState("MicOn", new State_TurnOnMicrophone(memory, events, resBox));
+        self.addState("MicOff", new State_TurnOffMicrophone(memory, events, resBox));
+        self.addTransition("MicOff", "end");
+        self.addTransition("Process", "MicOff");
+        self.addTransition("start", "MicOn");
+        self.addTransition("MicOn", "Process");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+MyDrinking_2018 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("O1", new ExecMongoElement(memory, events, resBox, ["v6ZHzQQ3di"], false));
+        self.addState("q1", new ExecMongoElement(memory, events, resBox, ["wPFh7S9lhn"], false));
+        self.addState("q2", new ExecMongoElement(memory, events, resBox, ["f8B0ihkAKr"], true));
+        self.addState("r_q2_Maya", new ExecMongoElement(memory, events, resBox, ["eYIwwIMqmA"], true));
+        self.addState("q3", new ExecMongoElement(memory, events, resBox, ["VLutfNbPnB"], true));
+        self.addState("O2", new ExecMongoElement(memory, events, resBox, ["2ryq9FqhYi"], false));
+        self.addState("O4", new ExecMongoElement(memory, events, resBox, ["F94yWz8Ail"], true));
+        self.addState("O3", new ExecMongoElement(memory, events, resBox, ["EMQoUI4ylK"], true));
+        self.addState("BlankResize", new ExecMongoElement(memory, events, resBox, ["zhvTNKV7iQ"], true));
+        self.addState("thankYouStatement", new ExecMongoElement(memory, events, resBox, ["zJ5XZ33e2H"], true));
+        self.addTransition("start", "O1");
+        self.addTransition("O1", "q1");
+        self.addTransition("q1", "O2");
+        self.addTransition("O4", "r_q2_Maya");
+        self.addTransition("O2", "q2");
+        self.addTransition("q2", "O3");
+        self.addTransition("O3", "O4");
+        self.addTransition("BlankResize", "q3");
+        self.addTransition("r_q2_Maya", "BlankResize");
+        self.addTransition("q3", "thankYouStatement");
+        self.addTransition("thankYouStatement", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+FB_AlcoholRelatedConsequences_2017 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("htmlContent", new ExecMongoElement(memory, events, resBox, ["4CeocZ16fa"], false));
+        self.addState("prompt", new ExecMongoElement(memory, events, resBox, ["EJ7JE6hvfI"], false));
+        self.addState("fullScreen", new ExecMongoElement(memory, events, resBox, ["A15xfVUN8j"], false));
+        self.addState("personalizedFeedback", new SayPhrase(memory, events, resBox, ));
+        self.addTransition("start", "htmlContent");
+        self.addTransition("htmlContent", "prompt");
+        self.addTransition("personalizedFeedback", "prompt");
+        self.addTransition("prompt", "fullScreen");
+        self.addTransition("fullScreen", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+DCU_FeedbackModule = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("Todo guided tour", new SayPhrase(memory, events, resBox, new Placeholder("TODO guided Tour")));
+        self.addState("intro", new ExecMongoElement(memory, events, resBox, ["578e87b8b1078d236712f53c"], false));
+        self.addState("choice", new ExecMongoElement(memory, events, resBox, ["578e87b8b1078d236712f53d"], false));
+        self.addState("getFeeback", new State_DrinkingConsequences(memory, events, resBox));
+        self.addTransition("Todo guided tour", "end");
+        self.addTransition("start", "intro");
+        self.addTransition("intro", "choice");
+        self.addTransition("choice", "Todo guided tour", new ConditionGuard(function(m){return m["lastUserAnswerId"]==0;}, function(m){m["feedbackChoice"]=0;}));
+        self.addTransition("choice", "getFeeback", new ConditionGuard(function(m){return m["lastUserAnswerId"]==1;}, function(m){m["feedbackChoice"]=1;}));
+        self.addTransition("getFeeback", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        self.memory["feedbackChoice"]=0;
+    }
+});
+
+CharacterSay_UserName = Class.create(InterventionEngineState,
+{
+    initialize: function($super, memory, events, resBox, placeholder)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.placeholder = placeholder; //box containing phrase - if >1 phrases, only first phrase will be spoken
+        self.R_charSpeaking = resBox.required[resBox.names.R_CHARSPEAKING];
+        self.P_charText = resBox.provided[resBox.names.P_CHARTEXT];
+        self.P_subs = resBox.provided[resBox.names.P_QA];
+        self.talked = false; //flag to only say the phrase once
+        self.waitingToSpeak = false; //flag to indicate that the character should start speaking soon (when audio gets loaded)
+
+    },
+    execute: function()
+    {
+        var self = this;
+        self.P_subs.container.questionId = -1;
+        
+        self.P_subs.container.timestamp = Date.now();
+        
+        self.angularScope = null;
+        var getAngularElement = function() {	
+        
+            var appElement = document.querySelector('[id=elementPanel]');
+            var scope = angular.element(appElement).scope();
+        
+            if(scope === undefined){
+        
+                setTimeout(function(){
+                    getAngularElement();
+                }, 10);
+                return;
+            }
+            self.angularScope = scope;         
+        }
+        getAngularElement();
+        
+        var counselorName = self.angularScope.$parent.$parent.$parent.$root.$root.selectedCounselor.name;
+        var userName = self.angularScope.userGivenName;
+        var speech = "Welcome "+ userName + " Thank you for taking the time to do that.";
+        self.P_subs.container.question = speech;
+        
+        if (!self.talked)
+        {
+            if (!speech)
+            {
+                console.log("ERROR: State_CharacterSay empty placeholder !");
+            }
+            else
+            {
+                self.P_charText.container.text = speech;
+                    self.P_charText.container.timestamp = Date.now();
+            }
+            self.talked = true;
+            self.waitingToSpeak = true;
+        }
+        else
+        {
+            if (self.R_charSpeaking.container.speaking)
+            {
+                self.waitingToSpeak = false; //the character actually began to speak
+            }
+            
+            //if wait time is over, and she's no longer speaking
+            if (!self.waitingToSpeak && !self.R_charSpeaking.container.speaking)
+            {
+                return true; //exit state
+            }
+        }
+        
+        return false; //continue to iterate
+    },
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        self.talked = false;
+        self.waitingToSpeak = false;
+    }
+});
+
+SADQC = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("Section A", new Form(memory, events, resBox, "bc6prF86RM"));
+        self.addState("Section B", new Form(memory, events, resBox, "rHhikyjunC"));
+        self.addState("Section C", new Form(memory, events, resBox, "elPlhR9mUu"));
+        self.addTransition("start", "Section A");
+        self.addTransition("Section A", "Section B");
+        self.addTransition("Section B", "Section C");
+        self.addTransition("Section C", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+Audit_2018 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("q1", new ExecMongoElement(memory, events, resBox, ["480OIkUfRe"], true));
+        self.addState("q2", new ExecMongoElement(memory, events, resBox, ["NTEyjG7JaV"], true));
+        self.addState("q3", new ExecMongoElement(memory, events, resBox, ["3b8HApHIsW"], true));
+        self.addState("q4", new ExecMongoElement(memory, events, resBox, ["9PV3mDHsYj"], true));
+        self.addState("q5", new ExecMongoElement(memory, events, resBox, ["o3Vvd9PuV4"], true));
+        self.addState("q6", new ExecMongoElement(memory, events, resBox, ["7hrQrRkroo"], true));
+        self.addState("q7", new ExecMongoElement(memory, events, resBox, ["fcrMyhewqP"], true));
+        self.addState("q8", new ExecMongoElement(memory, events, resBox, ["XnBeaqJpLP"], true));
+        self.addState("q9", new ExecMongoElement(memory, events, resBox, ["EoNDjbREoC"], true));
+        self.addState("q10", new ExecMongoElement(memory, events, resBox, ["TRbkGxXZij"], true));
+        self.addState("r1_q1", new ExecMongoElement(memory, events, resBox, ["1Q8GnXH1dj"], true));
+        self.addState("r2_q1", new ExecMongoElement(memory, events, resBox, ["09ZzF7tJhi"], true));
+        self.addState("r3_q1", new ExecMongoElement(memory, events, resBox, ["84o4lNKWSC"], true));
+        self.addState("r2_q4_Maya", new ExecMongoElement(memory, events, resBox, ["DmQoGxuLT3"], true));
+        self.addState("r1_q4_Maya", new ExecMongoElement(memory, events, resBox, ["HwC1KeBuD8"], true));
+        self.addState("r3_q4_Maya", new ExecMongoElement(memory, events, resBox, ["eYIwwIMqmA"], true));
+        self.addState("r3_q7", new ExecMongoElement(memory, events, resBox, ["84o4lNKWSC"], true));
+        self.addState("r1_q7", new ExecMongoElement(memory, events, resBox, ["1Q8GnXH1dj"], true));
+        self.addState("r2_q7", new ExecMongoElement(memory, events, resBox, ["09ZzF7tJhi"], true));
+        self.addState("r2_q8_Maya", new ExecMongoElement(memory, events, resBox, ["DmQoGxuLT3"], true));
+        self.addState("r1_q8_Maya", new ExecMongoElement(memory, events, resBox, ["HwC1KeBuD8"], true));
+        self.addState("r3_q8_Maya", new ExecMongoElement(memory, events, resBox, ["eYIwwIMqmA"], true));
+        self.addTransition("q2", "q3");
+        self.addTransition("q3", "q4");
+        self.addTransition("q5", "q6");
+        self.addTransition("q6", "q7");
+        self.addTransition("q9", "q10");
+        self.addTransition("q10", "end");
+        self.addTransition("q1", "r1_q1", new ConditionGuard(function(m){return (m["lastUserAnswerId"] == 0 || m["lastUserAnswerId"] == 1);}));
+        self.addTransition("q1", "r2_q1", new ConditionGuard(function(m){return (m["lastUserAnswerId"] == 2 || m["lastUserAnswerId"] == 3);}));
+        self.addTransition("q1", "r3_q1", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 4;}));
+        self.addTransition("q4", "r1_q4_Maya", new ConditionGuard(function(m){return (m["lastUserAnswerId"] == 0 || m["lastUserAnswerId"] == 1);}));
+        self.addTransition("q7", "r1_q7", new ConditionGuard(function(m){return (m["lastUserAnswerId"] == 0 || m["lastUserAnswerId"] == 1);}));
+        self.addTransition("q8", "r1_q8_Maya", new ConditionGuard(function(m){return (m["lastUserAnswerId"] == 0 || m["lastUserAnswerId"] == 1);}));
+        self.addTransition("q4", "r2_q4_Maya", new ConditionGuard(function(m){return (m["lastUserAnswerId"] == 2 ||  m["lastUserAnswerId"] == 3);}));
+        self.addTransition("q7", "r2_q7", new ConditionGuard(function(m){return (m["lastUserAnswerId"] == 2 ||  m["lastUserAnswerId"] == 3);}));
+        self.addTransition("q8", "r2_q8_Maya", new ConditionGuard(function(m){return (m["lastUserAnswerId"] == 2 ||  m["lastUserAnswerId"] == 3);}));
+        self.addTransition("q4", "r3_q4_Maya", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 4;}));
+        self.addTransition("q7", "r3_q7", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 4;}));
+        self.addTransition("q8", "r3_q8_Maya", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 4;}));
+        self.addTransition("r3_q8_Maya", "q9");
+        self.addTransition("r1_q8_Maya", "q9");
+        self.addTransition("r2_q8_Maya", "q9");
+        self.addTransition("r3_q7", "q8");
+        self.addTransition("r1_q7", "q8");
+        self.addTransition("r2_q7", "q8");
+        self.addTransition("r1_q4_Maya", "q5");
+        self.addTransition("r2_q4_Maya", "q5");
+        self.addTransition("r3_q4_Maya", "q5");
+        self.addTransition("r3_q1", "q2");
+        self.addTransition("r1_q1", "q2");
+        self.addTransition("r2_q1", "q2");
+        self.addTransition("start", "q2");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+DCU_OfferProgram = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("offerProgram", new ExecMongoElement(memory, events, resBox, ["57880ded6e272f55dd298204"], false));
+        self.addTransition("start", "offerProgram");
+        self.addTransition("offerProgram", "end", new ConditionGuard(function(m){return (m["lastUserAnswerId"] == 0);}, function(m){m["DCUOfferProgramDecision"] = 0;}));
+        self.addTransition("offerProgram", "end", new ConditionGuard(function(m){return (m["lastUserAnswerId"] == 1);}, function(m){m["DCUOfferProgramDecision"] = 1;}));
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        self.memory["DCUOfferProgramDecision"] = 0;
+    }
+});
+
+Procedure_Tutorial = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("TODO", new SayPhrase(memory, events, resBox, new Placeholder("TO DO rest of tutorial")));
+        self.addState("AskNeedHelp", new ExecMongoElement(memory, events, resBox, ["gDdwdKh7dm"], false));
+        self.addState("RespontToNo", new ExecMongoElement(memory, events, resBox, ["rrdU1gJKHF"], false));
+        self.addState("RespontToYes", new ExecMongoElement(memory, events, resBox, ["dgihn1p2pL"], false));
+        self.addState("ExplainAnswerInterface", new ExecMongoElement(memory, events, resBox, ["7bz1BvPf1h"], false));
+        self.addState("ExplainSpeech", new ExecMongoElement(memory, events, resBox, ["6v55TxNwB5"], false));
+        self.addState("ExplainWebcam", new ExecMongoElement(memory, events, resBox, ["gw4QGjbhUT"], false));
+        self.addState("ExplainProgress", new ExecMongoElement(memory, events, resBox, ["7hT1rxYKIN"], false));
+        self.addState("SegwayIntoAudit", new ExecMongoElement(memory, events, resBox, ["VSBk1iXhBM"], false));
+        self.addState("BasicIntroAndSegway", new ExecMongoElement(memory, events, resBox, ["7mwXueZMGG"], false));
+        self.addTransition("AskNeedHelp", "RespontToNo", new ConditionGuard(function(m){return m["lastUserAnswerId"]==1; /*no*/}));
+        self.addTransition("AskNeedHelp", "RespontToYes", new ConditionGuard(function(m){return m["lastUserAnswerId"]==0; /*yes*/}));
+        self.addTransition("RespontToYes", "ExplainAnswerInterface");
+        self.addTransition("ExplainAnswerInterface", "ExplainSpeech");
+        self.addTransition("ExplainSpeech", "ExplainWebcam");
+        self.addTransition("ExplainWebcam", "ExplainProgress");
+        self.addTransition("ExplainProgress", "SegwayIntoAudit");
+        self.addTransition("SegwayIntoAudit", "end");
+        self.addTransition("RespontToNo", "BasicIntroAndSegway");
+        self.addTransition("BasicIntroAndSegway", "end");
+        self.addTransition("start", "BasicIntroAndSegway");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_ClearHUD = Class.create(InterventionEngineState,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.P_subs = resBox.provided[resBox.names.P_QA];
+
+    },
+    execute: function()
+    {
+        var self = this;
+        self.P_subs.container.questionId = -1;
+        self.P_subs.container.question = "";
+        self.P_subs.container.answers = []; //clear old answers
+        self.P_subs.container.timestamp = Date.now();
+        
+        return true;
+    },
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_ResponseDecision_4Choices = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("happy", new ExecMongoElement(memory, events, resBox, ["1Q8GnXH1dj"], true));
+        self.addState("neutral", new ExecMongoElement(memory, events, resBox, ["09ZzF7tJhi"], true));
+        self.addState("concerned", new ExecMongoElement(memory, events, resBox, ["84o4lNKWSC"], true));
+        self.addTransition("start", "happy", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 0;}));
+        self.addTransition("start", "neutral", new ConditionGuard(function(m){return( m["lastUserAnswerId"] == 1 || m["lastUserAnswerId"] == 2);}));
+        self.addTransition("start", "concerned", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 3;}));
+        self.addTransition("happy", "end");
+        self.addTransition("neutral", "end");
+        self.addTransition("concerned", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+FB_YourDrinking_2017 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        //let e = Parse.Cloud.run("calculateAllScores", {});
+        //let completeSpeech = "";
+        //let bacScores = e.Result.bac.score;
+        //let totDrinks = bacScores.totDrinksPerWeek;
+        //let totHours = bacScores.totHours;
+        //let avgBAC = bacScores.avgBAC;
+        let scores;
+        Parse.Cloud.run("calculateAllScores", {}).then(function (e) {
+              scores = e;
+          });
+        
+        console.log(scores);
+        
+        
+        //console.log("******************************************************");
+        //console.log(e);
+        //completeSpeech = "Now we get a chance to review your drinking.  You can follow along with table in the right side of the screen. First, the total number of standard drinks you had per week in the last 4 weeks was, " + totDrinks + " Your drinking relative to other U.S. (insert users gender here) is: " + " user's percentage is here" + " Next, your peak BAC in the last month was, " +  avgBAC + " The number of hours you indicated that you spend intoxicated in a typical week was " + totHours + " Now, the amount of money you spend on alcohol in a typical week is  " + " insert dollar amount here" + " Lastly, the number of calories that you consume in a typical week by drinking is " + " total user's calories here";
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("htmlContent1", new ExecMongoElement(memory, events, resBox, ["kdqseuh1rp"], false));
+        self.addState("prompt1", new ExecMongoElement(memory, events, resBox, ["8iQsLIx8kJ"], false));
+        self.addState("fullScreen", new ExecMongoElement(memory, events, resBox, ["457ntcKmDh"], false));
+        self.addState("personalizedFeedback", new SayPhrase(memory, events, resBox, new Placeholder("VAR_scores_YourDrinking")));
+        self.addState("htmlContent2", new ExecMongoElement(memory, events, resBox, ["N5E7pmCYGV"], false));
+        self.addState("prompt2", new ExecMongoElement(memory, events, resBox, ["WHRZAhxA3N"], false));
+        self.addState("personalizedFeedback", new SayPhrase(memory, events, resBox, new Placeholder("VAR_scores_YourDrinking")));
+        self.addTransition("start", "htmlContent1");
+        self.addTransition("personalizedFeedback", "prompt1");
+        self.addTransition("fullScreen", "end");
+        self.addTransition("htmlContent1", "prompt1");
+        self.addTransition("prompt1", "htmlContent2");
+        self.addTransition("htmlContent2", "prompt2");
+        self.addTransition("prompt2", "fullScreen");
+        self.addTransition("personalizedFeedback", "prompt2");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_SaveUserAnswer = Class.create(InterventionEngineState,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.angularScope = null;
+        var getAngularElement = function() {	
+        
+            var appElement = document.querySelector('[id=userContext]');
+            var scope = angular.element(appElement).scope();
+        
+            if(scope === undefined){
+        
+                setTimeout(function(){
+                    getAngularElement();
+                }, 10);
+                return;
+            }
+            self.angularScope = scope;         
+        }
+        getAngularElement();
+        
+        //console.log("scope in the sMachine state_saveUserAnswer");
+        //console.log(self.angularScope);
+
+    },
+    execute: function()
+    {
+        var self = this;
+        var elemID = self.memory["mongoElementId"];
+        var answer = self.memory["lastUserAnswerId"];
+        var elemType = self.memory["mongoElementType"];
+        
+        if(elemType == 'TabularInput'){
+        
+           var response = answer;
+           answer = [];
+           var size = 0, keyA, keyB, i=0;
+        
+            for (keyA in response) {
+                if (response.hasOwnProperty(keyA)){
+                    let content = new Array();
+                    for (keyB in response[keyA]){
+                        if (response[keyA].hasOwnProperty(keyB)){
+                            content.push(response[keyA][keyB]);
+                        }
+                    }
+        
+        
+                    answer[i] = content;
+                    i++;
+                }
+            }
+            Parse.Cloud.run('addResponse', { elemID: elemID, answer: answer });
+                self.angularScope.updateUserProgress(elemID,  { elemID: elemID, answer: [answer] });
+            return true;
+            
+        
+        }else{
+            Parse.Cloud.run('addResponse', { elemID: elemID, answer: [answer] });
+                self.angularScope.updateUserProgress(elemID,  { elemID: elemID, answer: [answer] });
+            return true;
+        }
+    },
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+DCU_DecisionBalanceExercise = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("Decision Balance Excercise", new ExecMongoElement(memory, events, resBox, ["578d35dd2739ac219f781d55"], false));
+        self.addTransition("start", "Decision Balance Excercise");
+        self.addTransition("Decision Balance Excercise", "end", new ConditionGuard(function(m){return (m["lastUserAnswerId"]==0);}, function(m){m["HomeChoice"]=0;}));
+        self.addTransition("Decision Balance Excercise", "end", new ConditionGuard(function(m){return (m["lastUserAnswerId"]==1);}, function(m){m["HomeChoice"]=1;}));
+        self.addTransition("Decision Balance Excercise", "end", new ConditionGuard(function(m){return (m["lastUserAnswerId"]==2);}, function(m){m["HomeChoice"]=2;}));
+        self.addTransition("Decision Balance Excercise", "end", new ConditionGuard(function(m){return (m["lastUserAnswerId"]==3);}, function(m){m["HomeChoice"]=3;}));
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        self.memory["HomeChoice"] = 0;
+    }
+});
+
+AlcoholRelatedProblems_2018 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("o1", new ExecMongoElement(memory, events, resBox, ["MFieidSM2A"], false));
+        self.addState("q1", new ExecMongoElement(memory, events, resBox, ["is6vw6wRnG"], false));
+        self.addState("q2", new ExecMongoElement(memory, events, resBox, ["tBryo4ALxF"], true));
+        self.addState("q14", new ExecMongoElement(memory, events, resBox, ["KQlF0k42wm"], true));
+        self.addState("q3", new ExecMongoElement(memory, events, resBox, ["GuFCbEhXOV"], true));
+        self.addState("q4", new ExecMongoElement(memory, events, resBox, ["dSQV6eGkSu"], true));
+        self.addState("q5", new ExecMongoElement(memory, events, resBox, ["PzQplrhIWi"], true));
+        self.addState("q6", new ExecMongoElement(memory, events, resBox, ["CSKw4wbij4"], true));
+        self.addState("q7", new ExecMongoElement(memory, events, resBox, ["GggkBmfJ7o"], true));
+        self.addState("q8", new ExecMongoElement(memory, events, resBox, ["XLn7eaEH96"], true));
+        self.addState("q9", new ExecMongoElement(memory, events, resBox, ["AJycKpEegc"], true));
+        self.addState("q10", new ExecMongoElement(memory, events, resBox, ["1wjSdhf2eM"], true));
+        self.addState("q11", new ExecMongoElement(memory, events, resBox, ["9WHQFfzF4J"], true));
+        self.addState("q12", new ExecMongoElement(memory, events, resBox, ["Rf7rQvJfOt"], true));
+        self.addState("q13", new ExecMongoElement(memory, events, resBox, ["udBLvwkRax"], true));
+        self.addState("q15", new ExecMongoElement(memory, events, resBox, ["t5Vll6TJyu"], true));
+        self.addState("q16", new ExecMongoElement(memory, events, resBox, ["jLu5TZtwYU"], true));
+        self.addState("q17", new ExecMongoElement(memory, events, resBox, ["8Qz0T7pwMZ"], true));
+        self.addState("q18", new ExecMongoElement(memory, events, resBox, ["UqgD7PlgW3"], true));
+        self.addState("q19", new ExecMongoElement(memory, events, resBox, ["83FfJ9Zq3M"], true));
+        self.addState("q20", new ExecMongoElement(memory, events, resBox, ["oMop003d7A"], true));
+        self.addState("q21", new ExecMongoElement(memory, events, resBox, ["YHvVH5MqP1"], true));
+        self.addState("q22", new ExecMongoElement(memory, events, resBox, ["jUnJEgy9dm"], true));
+        self.addState("q23", new ExecMongoElement(memory, events, resBox, ["igQMYRzHJa"], true));
+        self.addState("q24", new ExecMongoElement(memory, events, resBox, ["XD5NKWQKhc"], true));
+        self.addState("q25", new ExecMongoElement(memory, events, resBox, ["S9UOlj8XAS"], true));
+        self.addState("q26", new ExecMongoElement(memory, events, resBox, ["QqcaH4ZiJM"], true));
+        self.addState("q27", new ExecMongoElement(memory, events, resBox, ["OmbUxx1Jha"], true));
+        self.addState("q28", new ExecMongoElement(memory, events, resBox, ["Et0gmveEIz"], true));
+        self.addState("q29", new ExecMongoElement(memory, events, resBox, ["rqnLEOB52H"], true));
+        self.addState("q30", new ExecMongoElement(memory, events, resBox, ["2oKhO7mWbO"], true));
+        self.addState("q31", new ExecMongoElement(memory, events, resBox, ["v9frAvBSJq"], true));
+        self.addState("q32", new ExecMongoElement(memory, events, resBox, ["a4QamiGCA3"], true));
+        self.addState("q33", new ExecMongoElement(memory, events, resBox, ["bGlMCixyKA"], true));
+        self.addState("q34", new ExecMongoElement(memory, events, resBox, ["wMWqoTE1gA"], true));
+        self.addState("q35", new ExecMongoElement(memory, events, resBox, ["k2ip8q0K2L"], true));
+        self.addState("q36", new ExecMongoElement(memory, events, resBox, ["xdA8C0leeD"], true));
+        self.addState("q37", new ExecMongoElement(memory, events, resBox, ["Wv4wzrJp0T"], true));
+        self.addState("q38", new ExecMongoElement(memory, events, resBox, ["WPjoWWTdGW"], true));
+        self.addState("q39", new ExecMongoElement(memory, events, resBox, ["7uAQj46Kc9"], true));
+        self.addState("q40", new ExecMongoElement(memory, events, resBox, ["Rvg0whSSHr"], true));
+        self.addState("q41", new ExecMongoElement(memory, events, resBox, ["ySxADohMIJ"], true));
+        self.addState("q42", new ExecMongoElement(memory, events, resBox, ["gCf1E8xcBt"], true));
+        self.addState("q43", new ExecMongoElement(memory, events, resBox, ["VlJABvnKDr"], true));
+        self.addState("q44", new ExecMongoElement(memory, events, resBox, ["6HjTndVKpf"], true));
+        self.addState("q45", new ExecMongoElement(memory, events, resBox, ["Gzv94vSMlK"], true));
+        self.addState("q46", new ExecMongoElement(memory, events, resBox, ["WDYFKBp4Ra"], true));
+        self.addState("q47", new ExecMongoElement(memory, events, resBox, ["o0gfHVKiZo"], true));
+        self.addState("q48", new ExecMongoElement(memory, events, resBox, ["8kksZw0b1i"], true));
+        self.addState("q49", new ExecMongoElement(memory, events, resBox, ["tPbHqZDc4F"], true));
+        self.addState("q50", new ExecMongoElement(memory, events, resBox, ["xX6fmHzV8a"], true));
+        self.addState("r2_q2_Maya", new ExecMongoElement(memory, events, resBox, ["DmQoGxuLT3"], false));
+        self.addState("r1_q2_Maya", new ExecMongoElement(memory, events, resBox, ["HwC1KeBuD8"], false));
+        self.addState("r3_q2_Maya", new ExecMongoElement(memory, events, resBox, ["eYIwwIMqmA"], false));
+        self.addState("r1_q6", new ExecMongoElement(memory, events, resBox, ["1Q8GnXH1dj"], false));
+        self.addState("r2_q6", new ExecMongoElement(memory, events, resBox, ["09ZzF7tJhi"], false));
+        self.addState("r3_q6", new ExecMongoElement(memory, events, resBox, ["84o4lNKWSC"], false));
+        self.addState("r1_q9_Maya", new ExecMongoElement(memory, events, resBox, ["HwC1KeBuD8"], false));
+        self.addState("r2_q9_Maya", new ExecMongoElement(memory, events, resBox, ["DmQoGxuLT3"], false));
+        self.addState("r3_q9_Maya", new ExecMongoElement(memory, events, resBox, ["eYIwwIMqmA"], false));
+        self.addState("r1_q11", new ExecMongoElement(memory, events, resBox, ["1Q8GnXH1dj"], false));
+        self.addState("r3_q11", new ExecMongoElement(memory, events, resBox, ["84o4lNKWSC"], false));
+        self.addState("r2_q11", new ExecMongoElement(memory, events, resBox, ["09ZzF7tJhi"], false));
+        self.addState("r17", new State_ResponseDecision_4Choices(memory, events, resBox));
+        self.addState("r22", new State_ResponseDecision_4Choices(memory, events, resBox));
+        self.addState("r27", new State_ResponseDecision_4Choices(memory, events, resBox));
+        self.addState("r33", new State_ResponseDecision_4Choices(memory, events, resBox));
+        self.addState("r38", new State_ResponseDecision_4Choices(memory, events, resBox));
+        self.addState("r45", new State_ResponseDecision_4Choices(memory, events, resBox));
+        self.addState("r49", new State_ResponseDecision_4Choices(memory, events, resBox));
+        self.addState("r_q14_Maya", new State_ResponseDecision_Maya_4Choices(memory, events, resBox));
+        self.addState("r24_Maya", new State_ResponseDecision_Maya_4Choices(memory, events, resBox));
+        self.addState("r19_Maya", new State_ResponseDecision_Maya_4Choices(memory, events, resBox));
+        self.addState("r30_Maya", new State_ResponseDecision_Maya_4Choices(memory, events, resBox));
+        self.addState("r35_Maya", new State_ResponseDecision_Maya_4Choices(memory, events, resBox));
+        self.addState("r41_Maya", new State_ResponseDecision_Maya_4Choices(memory, events, resBox));
+        self.addState("r47_Maya", new State_ResponseDecision_Maya_4Choices(memory, events, resBox));
+        self.addState("thankYouStatement", new ExecMongoElement(memory, events, resBox, ["wSpb4oQAnO"], true));
+        self.addTransition("start", "o1");
+        self.addTransition("o1", "q1");
+        self.addTransition("q1", "q2");
+        self.addTransition("q2", "r1_q2_Maya", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 0;}));
+        self.addTransition("q2", "r2_q2_Maya", new ConditionGuard(function(m){return( m["lastUserAnswerId"] == 1 || m["lastUserAnswerId"] == 2);}));
+        self.addTransition("q2", "r3_q2_Maya", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 3;}));
+        self.addTransition("r1_q2_Maya", "q3");
+        self.addTransition("r2_q2_Maya", "q3");
+        self.addTransition("r3_q2_Maya", "q3");
+        self.addTransition("q3", "q4");
+        self.addTransition("q4", "q5");
+        self.addTransition("q5", "q6");
+        self.addTransition("q6", "r1_q6", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 0;}));
+        self.addTransition("q6", "r2_q6", new ConditionGuard(function(m){return( m["lastUserAnswerId"] == 1 ||  m["lastUserAnswerId"] == 2);}));
+        self.addTransition("q6", "r3_q6", new ConditionGuard(function(m){return  m["lastUserAnswerId"] == 3;}));
+        self.addTransition("r1_q6", "q7");
+        self.addTransition("r2_q6", "q7");
+        self.addTransition("r3_q6", "q7");
+        self.addTransition("q7", "q8");
+        self.addTransition("q8", "q9");
+        self.addTransition("q9", "r1_q9_Maya", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 0;}));
+        self.addTransition("q9", "r2_q9_Maya", new ConditionGuard(function(m){return( m["lastUserAnswerId"] == 1 ||  m["lastUserAnswerId"] == 2);}));
+        self.addTransition("q9", "r3_q9_Maya", new ConditionGuard(function(m){return  m["lastUserAnswerId"] == 3;}));
+        self.addTransition("r1_q9_Maya", "q10");
+        self.addTransition("r2_q9_Maya", "q10");
+        self.addTransition("r3_q9_Maya", "q10");
+        self.addTransition("q10", "q11");
+        self.addTransition("q11", "r1_q11", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 0;}));
+        self.addTransition("q11", "r2_q11", new ConditionGuard(function(m){return( m["lastUserAnswerId"] == 1 ||  m["lastUserAnswerId"] == 2);}));
+        self.addTransition("q11", "r3_q11", new ConditionGuard(function(m){return  m["lastUserAnswerId"] == 3;}));
+        self.addTransition("r1_q11", "q12");
+        self.addTransition("r2_q11", "q12");
+        self.addTransition("r3_q11", "q12");
+        self.addTransition("q12", "q13");
+        self.addTransition("q13", "q14");
+        self.addTransition("q15", "q16");
+        self.addTransition("q16", "q17");
+        self.addTransition("q17", "r17");
+        self.addTransition("r17", "q18");
+        self.addTransition("q18", "q19");
+        self.addTransition("q20", "q21");
+        self.addTransition("q21", "q22");
+        self.addTransition("q22", "r22");
+        self.addTransition("r22", "q23");
+        self.addTransition("q23", "q24");
+        self.addTransition("q25", "q26");
+        self.addTransition("q26", "q27");
+        self.addTransition("q27", "r27");
+        self.addTransition("q28", "q29");
+        self.addTransition("q29", "q30");
+        self.addTransition("r27", "q28");
+        self.addTransition("q31", "q32");
+        self.addTransition("q32", "q33");
+        self.addTransition("q33", "r33");
+        self.addTransition("r33", "q34");
+        self.addTransition("q34", "q35");
+        self.addTransition("q36", "q37");
+        self.addTransition("q37", "q38");
+        self.addTransition("q38", "r38");
+        self.addTransition("r38", "q39");
+        self.addTransition("q39", "q40");
+        self.addTransition("q40", "q41");
+        self.addTransition("q42", "q43");
+        self.addTransition("q43", "q44");
+        self.addTransition("q44", "q45");
+        self.addTransition("q45", "r45");
+        self.addTransition("r45", "q46");
+        self.addTransition("q46", "q47");
+        self.addTransition("q48", "q49");
+        self.addTransition("q49", "r49");
+        self.addTransition("r49", "q50");
+        self.addTransition("q14", "r_q14_Maya");
+        self.addTransition("r_q14_Maya", "q15");
+        self.addTransition("q19", "r19_Maya");
+        self.addTransition("r19_Maya", "q20");
+        self.addTransition("q24", "r24_Maya");
+        self.addTransition("r24_Maya", "q25");
+        self.addTransition("q30", "r30_Maya");
+        self.addTransition("r30_Maya", "q31");
+        self.addTransition("q35", "r35_Maya");
+        self.addTransition("r35_Maya", "q36");
+        self.addTransition("q41", "r41_Maya");
+        self.addTransition("r41_Maya", "q42");
+        self.addTransition("q47", "r47_Maya");
+        self.addTransition("r47_Maya", "q48");
+        self.addTransition("q50", "thankYouStatement");
+        self.addTransition("thankYouStatement", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+Procedure_Get_Feedback = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("choice", new ExecMongoElement(memory, events, resBox, ["578e88cbb1078d236712f53f"], false));
+        self.addState("Quality of Drinking", new ExecMongoElement(memory, events, resBox, ["5804e430867b711ab07e605b"], false));
+        self.addState("Risk Factors", new ExecMongoElement(memory, events, resBox, ["5804fc77867b711ab07e605e"], false));
+        self.addState("Consequences", new ExecMongoElement(memory, events, resBox, ["580fb386867b711ab07e60662"], false));
+        self.addState("Dependence", new ExecMongoElement(memory, events, resBox, ["580fb386867b711ab07e6066"], false));
+        self.addState("Motivation", new ExecMongoElement(memory, events, resBox, ["580fb386867b711ab07e6066"], false));
+        self.addTransition("choice", "Quality of Drinking", new ConditionGuard(function(m){return m["lastUserAnswerId"]==0;}));
+        self.addTransition("Quality of Drinking", "end");
+        self.addTransition("choice", "Risk Factors", new ConditionGuard(function(m){return m["lastUserAnswerId"]==1;}));
+        self.addTransition("Risk Factors", "end");
+        self.addTransition("choice", "Consequences", new ConditionGuard(function(m){return m["lastUserAnswerId"]==2;}));
+        self.addTransition("Consequences", "end");
+        self.addTransition("choice", "Dependence", new ConditionGuard(function(m){return m["lastUserAnswerId"]==3;}));
+        self.addTransition("Dependence", "end");
+        self.addTransition("choice", "Motivation", new ConditionGuard(function(m){return m["lastUserAnswerId"]==4;}));
+        self.addTransition("Motivation", "end");
+        self.addTransition("start", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_Demo = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("1", new ExecMongoElement(memory, events, resBox, ["txPp1AoI1Q"], false));
+        self.addState("2", new ExecMongoElement(memory, events, resBox, ["Z5jVeD5EaQ"], false));
+        self.addTransition("start", "1");
+        self.addTransition("1", "2");
+        self.addTransition("2", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+InterventionModule = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("LookAtYourDrinking", new LookAtYourDrinking(memory, events, resBox));
+        self.addState("GetFeedback", new GetFeedback(memory, events, resBox));
+        self.addState("ConsiderYourOptions", new ConsiderYourOptions(memory, events, resBox));
+        self.addState("Main_Menu", new Initial_Intervention_Menu2018(memory, events, resBox));
+        self.addState("Branch_CompleteVsNotComplete", new Branch_CompleteVsNotComplete(memory, events, resBox));
+        self.addState("entireComplete", new Form(memory, events, resBox, "Gwv2yAMSbE"));
+        self.addState("NotComplete", new State_NotComplete(memory, events, resBox));
+        self.addTransition("start", "Main_Menu");
+        self.addTransition("LookAtYourDrinking", "Main_Menu");
+        self.addTransition("GetFeedback", "Main_Menu");
+        self.addTransition("Main_Menu", "LookAtYourDrinking", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 0;}));
+        self.addTransition("Main_Menu", "GetFeedback", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 1;}));
+        self.addTransition("Main_Menu", "ConsiderYourOptions", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 2;}));
+        self.addTransition("ConsiderYourOptions", "Branch_CompleteVsNotComplete");
+        self.addTransition("Branch_CompleteVsNotComplete", "entireComplete", new ConditionGuard(function(m){return m["entireComplete"] == 2;}));
+        self.addTransition("entireComplete", "end");
+        self.addTransition("Branch_CompleteVsNotComplete", "NotComplete", new ConditionGuard(function(m){return m["entireComplete"] == 1;}));
+        self.addTransition("NotComplete", "Main_Menu");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+LikeAndDontLikeAboutDrinking = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("LikeAboutDrinking", new Form(memory, events, resBox, "Naz9y3FSdF"));
+        self.addState("DontLikeAboutDrinking", new Form(memory, events, resBox, "ubFXFKSNEB"));
+        self.addTransition("start", "LikeAboutDrinking");
+        self.addTransition("LikeAboutDrinking", "DontLikeAboutDrinking");
+        self.addTransition("DontLikeAboutDrinking", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+Feedback_Menu_2017 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("feedbackMenu", new ExecMongoElement(memory, events, resBox, ["RLJpGOTkue"], ));
+        self.addTransition("start", "feedbackMenu");
+        self.addTransition("feedbackMenu", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_BAC = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("BAC_form", new Form(memory, events, resBox, "zTbzYpKdiG"));
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addTransition("start", "BAC_form");
+        self.addTransition("BAC_form", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+getFeedback = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("FB_GTNSGT_2017", new FB_GTNSGT_2017(memory, events, resBox));
+        self.addState("FB_YourDrinking_2017", new FB_YourDrinking_2017(memory, events, resBox));
+        self.addState("FB_AlcoholRelatedConsequences_2017", new FB_AlcoholRelatedConsequences_2017(memory, events, resBox));
+        self.addState("FB_Dependence_2017", new FB_Dependence_2017(memory, events, resBox));
+        self.addState("FB_Risk_2017", new FB_Risk_2017(memory, events, resBox));
+        self.addState("FB_Depression_2017", new FB_Depression_2017(memory, events, resBox));
+        self.addState("FB_ChancesOfReducing_2017", new FB_ChancesOfReducing_2017(memory, events, resBox));
+        self.addState("FeedbackMenu", new Feedback_Menu_2017(memory, events, resBox));
+        self.addState("FeedbackClosing", new Form(memory, events, resBox, "jOejJI6UrR"));
+        self.addTransition("start", "FeedbackMenu");
+        self.addTransition("FB_GTNSGT_2017", "FeedbackMenu");
+        self.addTransition("FeedbackMenu", "FB_GTNSGT_2017", new ConditionGuard(function(m){return m["lastUserAnswerId"]==0;}, function(m){m["feedbackChoice"]=0;}));
+        self.addTransition("FB_YourDrinking_2017", "FeedbackMenu");
+        self.addTransition("FeedbackMenu", "FB_YourDrinking_2017", new ConditionGuard(function(m){return m["lastUserAnswerId"]==1;}, function(m){m["feedbackChoice"]=1;}));
+        self.addTransition("FeedbackMenu", "FB_AlcoholRelatedConsequences_2017", new ConditionGuard(function(m){return m["lastUserAnswerId"]==2;}, function(m){m["feedbackChoice"]=2;}));
+        self.addTransition("FB_AlcoholRelatedConsequences_2017", "FeedbackMenu");
+        self.addTransition("FeedbackMenu", "FB_Dependence_2017", new ConditionGuard(function(m){return m["lastUserAnswerId"]==3;}, function(m){m["feedbackChoice"]=3;}));
+        self.addTransition("FB_Dependence_2017", "FeedbackMenu");
+        self.addTransition("FeedbackMenu", "FB_Risk_2017", new ConditionGuard(function(m){return m["lastUserAnswerId"]==4;}, function(m){m["feedbackChoice"]=4;}));
+        self.addTransition("FB_Risk_2017", "FeedbackMenu");
+        self.addTransition("FeedbackMenu", "FB_Depression_2017", new ConditionGuard(function(m){return m["lastUserAnswerId"]==5;}, function(m){m["feedbackChoice"]=5;}));
+        self.addTransition("FB_Depression_2017", "FeedbackMenu");
+        self.addTransition("FB_ChancesOfReducing_2017", "FeedbackMenu");
+        self.addTransition("FeedbackMenu", "FB_ChancesOfReducing_2017", new ConditionGuard(function(m){return m["lastUserAnswerId"]==6;}, function(m){m["feedbackChoice"]=6;}));
+        self.addTransition("FeedbackMenu", "FeedbackClosing", new ConditionGuard(function(m){return m["lastUserAnswerId"]==7;}, function(m){m["feedbackChoice"]=7;}));
+        self.addTransition("FeedbackClosing", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_ResponseDecision_Maya_4Choices = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("happy", new ExecMongoElement(memory, events, resBox, ["HwC1KeBuD8"], false));
+        self.addState("neutral", new ExecMongoElement(memory, events, resBox, ["DmQoGxuLT3"], false));
+        self.addState("concerned", new ExecMongoElement(memory, events, resBox, ["eYIwwIMqmA"], false));
+        self.addTransition("start", "happy", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 0;}));
+        self.addTransition("start", "neutral", new ConditionGuard(function(m){return( m["lastUserAnswerId"] == 1 || m["lastUserAnswerId"] == 2);}));
+        self.addTransition("start", "concerned", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 3;}));
+        self.addTransition("happy", "end");
+        self.addTransition("neutral", "end");
+        self.addTransition("concerned", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+Audit_Q1_WithRes = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("q1", new ExecMongoElement(memory, events, resBox, ["480OIkUfRe"], true));
+        self.addState("r3_q1", new ExecMongoElement(memory, events, resBox, ["84o4lNKWSC"], true));
+        self.addState("r1_q1", new ExecMongoElement(memory, events, resBox, ["1Q8GnXH1dj"], true));
+        self.addState("r2_q1", new ExecMongoElement(memory, events, resBox, ["09ZzF7tJhi"], true));
+        self.addState("r2_q1", new ExecMongoElement(memory, events, resBox, ["09ZzF7tJhi"], true));
+        self.addState("no drinking exit", new ExecMongoElement(memory, events, resBox, ["CN7PqLB8qj"], true));
+        self.addTransition("start", "q1");
+        self.addTransition("q1", "r1_q1", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 1;}, function(m){m["AUDITq1Drinking"] = 1;}));
+        self.addTransition("q1", "r2_q1", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 2;}, function(m){m["AUDITq1Drinking"] = 2;}));
+        self.addTransition("q1", "r3_q1", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 4;}, function(m){m["AUDITq1Drinking"] = 4;}));
+        self.addTransition("r3_q1", "end");
+        self.addTransition("r1_q1", "end");
+        self.addTransition("r2_q1", "end");
+        self.addTransition("q1", "r2_q1", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 3;}, function(m){m["AUDITq1Drinking"] = 3;}));
+        self.addTransition("r2_q1", "end");
+        self.addTransition("q1", "no drinking exit", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 0;}, function(m){m["AUDITq1Drinking"] = 0;}));
+        self.addTransition("no drinking exit", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+YourCurrentThinking_2019 = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("next", new ExecMongoElement(memory, events, resBox, ["vZbFCEAcBZ"], false));
+        self.addState("noInterestEver", new ExecMongoElement(memory, events, resBox, ["hI6sXHWYWz"], false));
+        self.addState("notNowButEventually", new ExecMongoElement(memory, events, resBox, ["kkxF2eQcvU"], false));
+        self.addState("consideringHow", new ExecMongoElement(memory, events, resBox, ["bAAao46RQB"], false));
+        self.addState("consideringCutting", new ExecMongoElement(memory, events, resBox, ["qntp57sR2T"], false));
+        self.addState("screenResize", new ExecMongoElement(memory, events, resBox, ["xdIvalWelX"], false));
+        self.addState("readinessQuestion", new ExecMongoElement(memory, events, resBox, ["PBkfQ9YBHJ"], false));
+        self.addTransition("start", "screenResize");
+        self.addTransition("screenResize", "readinessQuestion");
+        self.addTransition("readinessQuestion", "noInterestEver", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 0;}));
+        self.addTransition("readinessQuestion", "notNowButEventually", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 1;}));
+        self.addTransition("readinessQuestion", "consideringHow", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 2;}));
+        self.addTransition("readinessQuestion", "consideringCutting", new ConditionGuard(function(m){return m["lastUserAnswerId"] == 3;}));
+        self.addTransition("consideringCutting", "next");
+        self.addTransition("consideringHow", "next");
+        self.addTransition("notNowButEventually", "next");
+        self.addTransition("noInterestEver", "next");
+        self.addTransition("next", "end");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+Branch_CompleteVsNotComplete = Class.create(InterventionEngineState,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        self.angularScope = null;
+        var getAngularElement = function() {	
+        
+            var appElement = document.querySelector('[id=userContext]');
+            var scope = angular.element(appElement).scope();
+        
+            if(scope === undefined){
+        
+                setTimeout(function(){
+                    getAngularElement();
+                }, 10);
+                return;
+            }
+            self.angularScope = scope;         
+        }
+        getAngularElement();
+
+    },
+    execute: function()
+    {
+        var self = this;
+        // console.log("entireComplete:");
+        // console.log(self.memory["entireComplete"]);
+        
+        return self.memory["entireComplete"];
+    },
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        self.memory["entireComplete"] = 1;
+        if(self.angularScope.currentUserProgress != null){
+        if(self.angularScope.currentUserProgress.attributes.entireComplete.length > 1){
+            self.memory["entireComplete"] = 2;
+        }
+        }
+    }
+});
+
+State_NotComplete = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.addState("start", new State_Empty(memory, events, resBox));
+        self.addState("end", new State_Empty(memory, events, resBox));
+        self.addState("ContinueStatement", new ExecMongoElement(memory, events, resBox, ["hPO4koh4LO"], false));
+        self.addState("Comments", new ExecMongoElement(memory, events, resBox, ["Rq8rs5GAeA"], false));
+        self.addTransition("ContinueStatement", "end");
+        self.addTransition("start", "Comments");
+        self.addTransition("Comments", "ContinueStatement");
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});
+
+State_NameDefault = Class.create(InterventionEngine,
+{
+    initialize: function($super, memory, events, resBox)
+    {
+        var self = this;
+        $super(memory, events, resBox);
+        
+        self.setInitialState("start");
+        self.setFinalState("end");
+    },
+    
+    beforeExecution: function($super)
+    {
+        var self = this;
+        $super();
+        
+    }
+});

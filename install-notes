@@ -1,0 +1,18 @@
+-------------------------------------------------------------------
+
+1) upgrade nodejs to v8
+
+$ sudo apt-get update
+$ sudo apt-get install curl
+$ curl -sL https://deb.nodesource.com/setup_10.x | sudo -E bash -
+$ sudo apt-get install -y nodejs
+
+-------------------------------------------------------------------
+
+2) install node modules (cd to project root)
+
+$ npm install .
+
+-------------------------------------------------------------------
+
+3) in webstorms, after following tutorial, add the rest of the environment variables (as shown in the png file in project root)
